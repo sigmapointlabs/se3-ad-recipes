@@ -1,0 +1,21 @@
+[package]
+name = "se3-ad-recipes"
+version = "0.1.0"
+edition = "2024"
+authors = ["Frank O. Kuehnel <frank@sigmapointlabs.com>"]
+description = "AD recipes for SE(3) Hessians — eight-way bench, companion to SE3_ad_letter §VI / Table I"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sigmapointlabs/se3-ad-recipes"
+readme = "README.md"
+keywords = ["se3", "lie-group", "automatic-differentiation", "hessian", "slam"]
+categories = ["robotics", "science", "mathematics"]
+
+[dependencies]
+# (none — the closure is zero-dep at runtime)
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "nll_hessian"
+harness = false

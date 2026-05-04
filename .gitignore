@@ -1,0 +1,11 @@
+# Cargo build output
+/target/
+# macOS
+.DS_Store
+# Editor caches and swap files
+*.swp
+*.tmp
+*.bak
+# Optional: per-developer IDE config (uncomment if your team uses these)
+# /.vscode/
+# /.idea/

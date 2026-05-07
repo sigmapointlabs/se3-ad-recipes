@@ -587,6 +587,78 @@ pub fn so3_log_g<T: AD>(r: &Mat3G<T>) -> Vec3G<T> {
 }
 
 // =========================================================================
+// Quaternion half-angle atoms (degree-4 in s, threshold-gated)
+// =========================================================================
+//
+// Two AD-safe fused scalars for the unit quaternion representation of
+// SO(3): q = (cos(θ/2), sin(θ/2)·ω̂) ∈ SU(2), the double cover of SO(3).
+// Both flow through `(s, θ)` and integrate cleanly with
+// `theta_sq_from_omega` and the rest of the s-native recipe.
+//
+// Unlike β̄(s) — which is single-branch Taylor across the entire chart
+// because `β(s)` shrinks linearly in s — these atoms remain O(1) at θ ≈ π
+// and the closed forms `cos(θ/2)` and `sin(θ/2)/θ` evaluate accurately
+// there.  We therefore use the same threshold split as `scalar_a_s`:
+// degree-4 Taylor below `TAYLOR_THRESHOLD_S = 1e-4` (matches the exact
+// form to f64 precision at the boundary, verified to 0 ULP at
+// θ ≈ 0.01 rad), exact closed form above (no removable singularity since
+// `θ = √s` is already finite there).
+
+/// cos(θ/2), reached from (s, θ).  Scalar component q₀ of the unit
+/// quaternion q = (cos(θ/2), sin(θ/2)·ω̂) representing R(ω) ∈ SO(3).
+///
+/// Taylor (degree 4, in s = θ²):
+///
+/// ```text
+/// 1 − s/8 + s²/384 − s³/46080 + s⁴/10321920 − …
+/// ```
+///
+/// AD-safe to depth 4 in s = depth 8 in θ — well past the recipe's
+/// depth-3 working margin.
+#[inline]
+pub fn scalar_cos_half_s<T: AD>(s: T, theta: T) -> T {
+    if s.to_constant() < TAYLOR_THRESHOLD_S {
+        T::constant(1.0)
+            + s * (T::constant(-1.0 / 8.0)
+                + s * (T::constant(1.0 / 384.0)
+                    + s * (T::constant(-1.0 / 46080.0) + s * T::constant(1.0 / 10321920.0))))
+    } else {
+        (T::constant(0.5) * theta).cos()
+    }
+}
+
+/// (1/2)·sinc(θ/2) ≡ sin(θ/2)/θ, reached from (s, θ).  Builds the vector
+/// quaternion components of q = (cos(θ/2), sin(θ/2)·ω̂):
+///
+/// ```text
+/// qv_m = ω_m · scalar_half_sinc_half_s(s, θ)
+/// ```
+///
+/// because qv = sin(θ/2) · ω̂ = sin(θ/2) · ω/θ = ω · [sin(θ/2)/θ].  This
+/// fused form keeps `1/θ` out of the AD path — `sin(θ/2)/θ` evaluated at
+/// θ = 0 is the removable 0/0 that the Taylor branch handles directly.
+///
+/// Taylor (degree 4, in s = θ²):
+///
+/// ```text
+/// 1/2 − s/48 + s²/3840 − s³/645120 + s⁴/185794560 − …
+/// ```
+///
+/// At s = 0 this evaluates to 1/2, matching the limit
+/// `lim_{θ→0} sin(θ/2)/θ = 1/2`.  AD-safe to depth 4 in s.
+#[inline]
+pub fn scalar_half_sinc_half_s<T: AD>(s: T, theta: T) -> T {
+    if s.to_constant() < TAYLOR_THRESHOLD_S {
+        T::constant(0.5)
+            + s * (T::constant(-1.0 / 48.0)
+                + s * (T::constant(1.0 / 3840.0)
+                    + s * (T::constant(-1.0 / 645120.0) + s * T::constant(1.0 / 185794560.0))))
+    } else {
+        (T::constant(0.5) * theta).sin() / theta
+    }
+}
+
+// =========================================================================
 // Tests — branch continuity and analytical Taylor coefficients
 // =========================================================================
 
@@ -986,4 +1058,169 @@ mod tests {
             }
         }
     }
+}
+
+#[test]
+fn cos_half_at_origin_is_one() {
+    let v = scalar_cos_half_s::<f64>(0.0, 0.0);
+    assert!((v - 1.0).abs() < 1e-15);
+}
+
+#[test]
+fn half_sinc_half_at_origin_is_one_half() {
+    let v = scalar_half_sinc_half_s::<f64>(0.0, 0.0);
+    assert!((v - 0.5).abs() < 1e-15);
+}
+
+#[test]
+fn cos_half_branches_match_at_threshold_boundary() {
+    // Exactly at the threshold, both formulae must agree to f64 precision.
+    let s_at = TAYLOR_THRESHOLD_S;
+    let theta_at = s_at.sqrt();
+    let taylor = 1.0 - s_at / 8.0 + s_at * s_at / 384.0 - s_at * s_at * s_at / 46080.0
+        + s_at * s_at * s_at * s_at / 10321920.0;
+
+    let exact = (0.5 * theta_at).cos();
+    assert!(
+        (taylor - exact).abs() < 1e-15,
+        "cos(θ/2) at threshold: taylor={taylor:.18e} exact={exact:.18e}"
+    );
+}
+
+#[test]
+fn half_sinc_half_branches_match_at_threshold_boundary() {
+    let s_at = TAYLOR_THRESHOLD_S;
+    let theta_at = s_at.sqrt();
+    let taylor = 0.5 - s_at / 48.0 + s_at * s_at / 3840.0 - s_at * s_at * s_at / 645120.0
+        + s_at * s_at * s_at * s_at / 185794560.0;
+
+    let exact = (0.5 * theta_at).sin() / theta_at;
+    assert!(
+        (taylor - exact).abs() < 1e-15,
+        "half_sinc at threshold: taylor={taylor:.18e} exact={exact:.18e}"
+    );
+}
+
+#[test]
+fn cos_half_matches_native_across_chart() {
+    for &theta in &[0.01_f64, 0.1, 0.5, 1.0, 2.0, 3.0] {
+        let s = theta * theta;
+        let ours = scalar_cos_half_s::<f64>(s, theta);
+        let native = (theta / 2.0).cos();
+        let rel = (ours - native).abs() / native.abs().max(1e-15);
+        assert!(rel < 1e-13, "cos(θ/2) at θ={theta}: rel={rel:.2e}");
+    }
+}
+
+#[test]
+fn half_sinc_half_matches_native_across_chart() {
+    for &theta in &[0.01_f64, 0.1, 0.5, 1.0, 2.0, 3.0] {
+        let s = theta * theta;
+        let ours = scalar_half_sinc_half_s::<f64>(s, theta);
+        let native = (theta / 2.0).sin() / theta;
+        let rel = (ours - native).abs() / native.abs().max(1e-15);
+        assert!(rel < 1e-13, "half_sinc at θ={theta}: rel={rel:.2e}");
+    }
+}
+
+/// Depth-3 verification of `scalar_cos_half_s` Taylor coefficients via
+/// `D3<1>` nested AD at s = 0.
+#[test]
+fn cos_half_third_derivative_via_d3_matches_taylor() {
+    use crate::autodiff::nested_ad::Dual;
+
+    let l1 = Dual::<f64, 1>::seed(0.0, 0);
+    let l2 = Dual::<Dual<f64, 1>, 1>::seed(l1, 0);
+    let l3 = Dual::<Dual<Dual<f64, 1>, 1>, 1>::seed(l2, 0);
+    let theta = Dual::<Dual<Dual<f64, 1>, 1>, 1>::constant(0.0);
+    let r = scalar_cos_half_s(l3, theta);
+
+    let f0 = r.value.value.value;
+    let f1 = r.value.value.tangent[0];
+    let f2 = r.value.tangent[0].tangent[0];
+    let f3 = r.tangent[0].tangent[0].tangent[0];
+
+    // cos(θ/2) Taylor: 1 − s/8 + s²/384 − s³/46080 + …
+    // → f(0)=1, f'(0)=−1/8, f''(0)=1/192, f'''(0)=−1/7680.
+    assert!((f0 - 1.0).abs() < 1e-15, "f(0)={f0:.6e}");
+    assert!((f1 + 1.0 / 8.0).abs() < 1e-15, "f'(0)={f1:.6e}");
+    assert!((f2 - 1.0 / 192.0).abs() < 1e-15, "f''(0)={f2:.6e}");
+    assert!((f3 + 1.0 / 7680.0).abs() < 1e-15, "f'''(0)={f3:.6e}");
+}
+
+/// Depth-3 verification of `scalar_half_sinc_half_s` Taylor coefficients
+/// via `D3<1>` nested AD at s = 0.
+#[test]
+fn half_sinc_half_third_derivative_via_d3_matches_taylor() {
+    use crate::autodiff::nested_ad::Dual;
+
+    let l1 = Dual::<f64, 1>::seed(0.0, 0);
+    let l2 = Dual::<Dual<f64, 1>, 1>::seed(l1, 0);
+    let l3 = Dual::<Dual<Dual<f64, 1>, 1>, 1>::seed(l2, 0);
+    let theta = Dual::<Dual<Dual<f64, 1>, 1>, 1>::constant(0.0);
+    let r = scalar_half_sinc_half_s(l3, theta);
+
+    let f0 = r.value.value.value;
+    let f1 = r.value.value.tangent[0];
+    let f2 = r.value.tangent[0].tangent[0];
+    let f3 = r.tangent[0].tangent[0].tangent[0];
+
+    // (1/2)·sinc(θ/2) Taylor: 1/2 − s/48 + s²/3840 − s³/645120 + …
+    // → f(0)=1/2, f'(0)=−1/48, f''(0)=1/1920, f'''(0)=−1/107520.
+    assert!((f0 - 0.5).abs() < 1e-15, "f(0)={f0:.6e}");
+    assert!((f1 + 1.0 / 48.0).abs() < 1e-15, "f'(0)={f1:.6e}");
+    assert!((f2 - 1.0 / 1920.0).abs() < 1e-15, "f''(0)={f2:.6e}");
+    assert!((f3 + 1.0 / 107520.0).abs() < 1e-15, "f'''(0)={f3:.6e}");
+}
+
+/// D3 at non-zero s — verifies the AD machinery correctly differentiates
+/// the implemented polynomial at a representative s.  IMPORTANT: s_val
+/// MUST be below `TAYLOR_THRESHOLD_S`.  Above threshold the function
+/// returns `cos(theta/2)` where `theta` is wrapped as a D3 *constant*, so
+/// AD sees a constant and gives zero derivatives — that's correct
+/// behaviour for the closed-form branch but uninformative as a test.
+/// Below threshold we exercise the polynomial path that AD will actually
+/// see in nested-AD-driven Hessian / cubic evaluations.
+#[test]
+fn cos_half_third_derivative_via_d3_at_nonzero_s() {
+    use crate::autodiff::nested_ad::Dual;
+
+    let s_val: f64 = 5e-5;
+    let l1 = Dual::<f64, 1>::seed(s_val, 0);
+    let l2 = Dual::<Dual<f64, 1>, 1>::seed(l1, 0);
+    let l3 = Dual::<Dual<Dual<f64, 1>, 1>, 1>::seed(l2, 0);
+    let theta = Dual::<Dual<Dual<f64, 1>, 1>, 1>::constant(s_val.sqrt());
+    let r = scalar_cos_half_s(l3, theta);
+    let f3 = r.tangent[0].tangent[0].tangent[0];
+
+    // f'''_poly(s) = 6·(−1/46080) + 24·(1/10321920)·s
+    //              = −1/7680 + s/430080
+    let expected = -1.0 / 7680.0 + s_val / 430080.0;
+    let rel = (f3 - expected).abs() / expected.abs();
+    assert!(
+        rel < 1e-13,
+        "f'''(s={s_val})={f3:.6e}, expected {expected:.6e}, rel {rel:.2e}"
+    );
+}
+
+#[test]
+fn half_sinc_half_third_derivative_via_d3_at_nonzero_s() {
+    use crate::autodiff::nested_ad::Dual;
+
+    let s_val: f64 = 5e-5; // below TAYLOR_THRESHOLD_S; see note above
+    let l1 = Dual::<f64, 1>::seed(s_val, 0);
+    let l2 = Dual::<Dual<f64, 1>, 1>::seed(l1, 0);
+    let l3 = Dual::<Dual<Dual<f64, 1>, 1>, 1>::seed(l2, 0);
+    let theta = Dual::<Dual<Dual<f64, 1>, 1>, 1>::constant(s_val.sqrt());
+    let r = scalar_half_sinc_half_s(l3, theta);
+    let f3 = r.tangent[0].tangent[0].tangent[0];
+
+    // f'''_poly(s) = 6·(−1/645120) + 24·(1/185794560)·s
+    //              = −1/107520 + s/7741440
+    let expected = -1.0 / 107520.0 + s_val / 7741440.0;
+    let rel = (f3 - expected).abs() / expected.abs();
+    assert!(
+        rel < 1e-13,
+        "f'''(s={s_val})={f3:.6e}, expected {expected:.6e}, rel {rel:.2e}"
+    );
 }

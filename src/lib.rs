@@ -40,6 +40,9 @@ pub mod nll_bench;
 #[cfg(test)]
 mod nll_tests;
 
+#[cfg(test)]
+mod manif_recipe_minimal;
+
 // ─── Type aliases ───────────────────────────────────────────────────────
 
 /// 3×3 matrix, row-major.

@@ -608,7 +608,10 @@ pub fn so3_log_g<T: AD>(r: &Mat3G<T>) -> Vec3G<T> {
 /// quaternion q = (cos(θ/2), sin(θ/2)·ω̂) representing R(ω) ∈ SO(3).
 ///
 /// Taylor (degree 4, in s = θ²):
-///     1 − s/8 + s²/384 − s³/46080 + s⁴/10321920 − …
+///
+/// ```text
+/// 1 − s/8 + s²/384 − s³/46080 + s⁴/10321920 − …
+/// ```
 ///
 /// AD-safe to depth 4 in s = depth 8 in θ — well past the recipe's
 /// depth-3 working margin.
@@ -623,18 +626,23 @@ pub fn scalar_cos_half_s<T: AD>(s: T, theta: T) -> T {
         (T::constant(0.5) * theta).cos()
     }
 }
-
+ 
 /// (1/2)·sinc(θ/2) ≡ sin(θ/2)/θ, reached from (s, θ).  Builds the vector
 /// quaternion components of q = (cos(θ/2), sin(θ/2)·ω̂):
 ///
-///     qv_m = ω_m · scalar_half_sinc_half_s(s, θ)
+/// ```text
+/// qv_m = ω_m · scalar_half_sinc_half_s(s, θ)
+/// ```
 ///
 /// because qv = sin(θ/2) · ω̂ = sin(θ/2) · ω/θ = ω · [sin(θ/2)/θ].  This
 /// fused form keeps `1/θ` out of the AD path — `sin(θ/2)/θ` evaluated at
 /// θ = 0 is the removable 0/0 that the Taylor branch handles directly.
 ///
 /// Taylor (degree 4, in s = θ²):
-///     1/2 − s/48 + s²/3840 − s³/645120 + s⁴/185794560 − …
+///
+/// ```text
+/// 1/2 − s/48 + s²/3840 − s³/645120 + s⁴/185794560 − …
+/// ```
 ///
 /// At s = 0 this evaluates to 1/2, matching the limit
 /// `lim_{θ→0} sin(θ/2)/θ = 1/2`.  AD-safe to depth 4 in s.
@@ -1071,6 +1079,7 @@ fn cos_half_branches_match_at_threshold_boundary() {
     let theta_at = s_at.sqrt();
     let taylor = 1.0 - s_at / 8.0 + s_at * s_at / 384.0 - s_at * s_at * s_at / 46080.0
         + s_at * s_at * s_at * s_at / 10321920.0;
+
     let exact = (0.5 * theta_at).cos();
     assert!(
         (taylor - exact).abs() < 1e-15,
@@ -1084,6 +1093,7 @@ fn half_sinc_half_branches_match_at_threshold_boundary() {
     let theta_at = s_at.sqrt();
     let taylor = 0.5 - s_at / 48.0 + s_at * s_at / 3840.0 - s_at * s_at * s_at / 645120.0
         + s_at * s_at * s_at * s_at / 185794560.0;
+
     let exact = (0.5 * theta_at).sin() / theta_at;
     assert!(
         (taylor - exact).abs() < 1e-15,

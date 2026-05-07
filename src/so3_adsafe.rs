@@ -618,13 +618,12 @@ pub fn scalar_cos_half_s<T: AD>(s: T, theta: T) -> T {
         T::constant(1.0)
             + s * (T::constant(-1.0 / 8.0)
                 + s * (T::constant(1.0 / 384.0)
-                    + s * (T::constant(-1.0 / 46080.0)
-                        + s * T::constant(1.0 / 10321920.0))))
+                    + s * (T::constant(-1.0 / 46080.0) + s * T::constant(1.0 / 10321920.0))))
     } else {
         (T::constant(0.5) * theta).cos()
     }
 }
- 
+
 /// (1/2)·sinc(θ/2) ≡ sin(θ/2)/θ, reached from (s, θ).  Builds the vector
 /// quaternion components of q = (cos(θ/2), sin(θ/2)·ω̂):
 ///
@@ -645,8 +644,7 @@ pub fn scalar_half_sinc_half_s<T: AD>(s: T, theta: T) -> T {
         T::constant(0.5)
             + s * (T::constant(-1.0 / 48.0)
                 + s * (T::constant(1.0 / 3840.0)
-                    + s * (T::constant(-1.0 / 645120.0)
-                        + s * T::constant(1.0 / 185794560.0))))
+                    + s * (T::constant(-1.0 / 645120.0) + s * T::constant(1.0 / 185794560.0))))
     } else {
         (T::constant(0.5) * theta).sin() / theta
     }
@@ -1053,46 +1051,46 @@ mod tests {
         }
     }
 }
- 
+
 #[test]
 fn cos_half_at_origin_is_one() {
     let v = scalar_cos_half_s::<f64>(0.0, 0.0);
     assert!((v - 1.0).abs() < 1e-15);
 }
- 
+
 #[test]
 fn half_sinc_half_at_origin_is_one_half() {
     let v = scalar_half_sinc_half_s::<f64>(0.0, 0.0);
     assert!((v - 0.5).abs() < 1e-15);
 }
- 
+
 #[test]
 fn cos_half_branches_match_at_threshold_boundary() {
     // Exactly at the threshold, both formulae must agree to f64 precision.
     let s_at = TAYLOR_THRESHOLD_S;
     let theta_at = s_at.sqrt();
-    let taylor = 1.0 - s_at/8.0 + s_at*s_at/384.0
-        - s_at*s_at*s_at/46080.0 + s_at*s_at*s_at*s_at/10321920.0;
+    let taylor = 1.0 - s_at / 8.0 + s_at * s_at / 384.0 - s_at * s_at * s_at / 46080.0
+        + s_at * s_at * s_at * s_at / 10321920.0;
     let exact = (0.5 * theta_at).cos();
     assert!(
         (taylor - exact).abs() < 1e-15,
         "cos(θ/2) at threshold: taylor={taylor:.18e} exact={exact:.18e}"
     );
 }
- 
+
 #[test]
 fn half_sinc_half_branches_match_at_threshold_boundary() {
     let s_at = TAYLOR_THRESHOLD_S;
     let theta_at = s_at.sqrt();
-    let taylor = 0.5 - s_at/48.0 + s_at*s_at/3840.0
-        - s_at*s_at*s_at/645120.0 + s_at*s_at*s_at*s_at/185794560.0;
+    let taylor = 0.5 - s_at / 48.0 + s_at * s_at / 3840.0 - s_at * s_at * s_at / 645120.0
+        + s_at * s_at * s_at * s_at / 185794560.0;
     let exact = (0.5 * theta_at).sin() / theta_at;
     assert!(
         (taylor - exact).abs() < 1e-15,
         "half_sinc at threshold: taylor={taylor:.18e} exact={exact:.18e}"
     );
 }
- 
+
 #[test]
 fn cos_half_matches_native_across_chart() {
     for &theta in &[0.01_f64, 0.1, 0.5, 1.0, 2.0, 3.0] {
@@ -1103,7 +1101,7 @@ fn cos_half_matches_native_across_chart() {
         assert!(rel < 1e-13, "cos(θ/2) at θ={theta}: rel={rel:.2e}");
     }
 }
- 
+
 #[test]
 fn half_sinc_half_matches_native_across_chart() {
     for &theta in &[0.01_f64, 0.1, 0.5, 1.0, 2.0, 3.0] {
@@ -1114,57 +1112,57 @@ fn half_sinc_half_matches_native_across_chart() {
         assert!(rel < 1e-13, "half_sinc at θ={theta}: rel={rel:.2e}");
     }
 }
- 
+
 /// Depth-3 verification of `scalar_cos_half_s` Taylor coefficients via
 /// `D3<1>` nested AD at s = 0.
 #[test]
 fn cos_half_third_derivative_via_d3_matches_taylor() {
     use crate::autodiff::nested_ad::Dual;
- 
+
     let l1 = Dual::<f64, 1>::seed(0.0, 0);
     let l2 = Dual::<Dual<f64, 1>, 1>::seed(l1, 0);
     let l3 = Dual::<Dual<Dual<f64, 1>, 1>, 1>::seed(l2, 0);
     let theta = Dual::<Dual<Dual<f64, 1>, 1>, 1>::constant(0.0);
     let r = scalar_cos_half_s(l3, theta);
- 
+
     let f0 = r.value.value.value;
     let f1 = r.value.value.tangent[0];
     let f2 = r.value.tangent[0].tangent[0];
     let f3 = r.tangent[0].tangent[0].tangent[0];
- 
+
     // cos(θ/2) Taylor: 1 − s/8 + s²/384 − s³/46080 + …
     // → f(0)=1, f'(0)=−1/8, f''(0)=1/192, f'''(0)=−1/7680.
     assert!((f0 - 1.0).abs() < 1e-15, "f(0)={f0:.6e}");
-    assert!((f1 + 1.0/8.0).abs() < 1e-15, "f'(0)={f1:.6e}");
-    assert!((f2 - 1.0/192.0).abs() < 1e-15, "f''(0)={f2:.6e}");
-    assert!((f3 + 1.0/7680.0).abs() < 1e-15, "f'''(0)={f3:.6e}");
+    assert!((f1 + 1.0 / 8.0).abs() < 1e-15, "f'(0)={f1:.6e}");
+    assert!((f2 - 1.0 / 192.0).abs() < 1e-15, "f''(0)={f2:.6e}");
+    assert!((f3 + 1.0 / 7680.0).abs() < 1e-15, "f'''(0)={f3:.6e}");
 }
- 
+
 /// Depth-3 verification of `scalar_half_sinc_half_s` Taylor coefficients
 /// via `D3<1>` nested AD at s = 0.
 #[test]
 fn half_sinc_half_third_derivative_via_d3_matches_taylor() {
     use crate::autodiff::nested_ad::Dual;
- 
+
     let l1 = Dual::<f64, 1>::seed(0.0, 0);
     let l2 = Dual::<Dual<f64, 1>, 1>::seed(l1, 0);
     let l3 = Dual::<Dual<Dual<f64, 1>, 1>, 1>::seed(l2, 0);
     let theta = Dual::<Dual<Dual<f64, 1>, 1>, 1>::constant(0.0);
     let r = scalar_half_sinc_half_s(l3, theta);
- 
+
     let f0 = r.value.value.value;
     let f1 = r.value.value.tangent[0];
     let f2 = r.value.tangent[0].tangent[0];
     let f3 = r.tangent[0].tangent[0].tangent[0];
- 
+
     // (1/2)·sinc(θ/2) Taylor: 1/2 − s/48 + s²/3840 − s³/645120 + …
     // → f(0)=1/2, f'(0)=−1/48, f''(0)=1/1920, f'''(0)=−1/107520.
     assert!((f0 - 0.5).abs() < 1e-15, "f(0)={f0:.6e}");
-    assert!((f1 + 1.0/48.0).abs() < 1e-15, "f'(0)={f1:.6e}");
-    assert!((f2 - 1.0/1920.0).abs() < 1e-15, "f''(0)={f2:.6e}");
-    assert!((f3 + 1.0/107520.0).abs() < 1e-15, "f'''(0)={f3:.6e}");
+    assert!((f1 + 1.0 / 48.0).abs() < 1e-15, "f'(0)={f1:.6e}");
+    assert!((f2 - 1.0 / 1920.0).abs() < 1e-15, "f''(0)={f2:.6e}");
+    assert!((f3 + 1.0 / 107520.0).abs() < 1e-15, "f'''(0)={f3:.6e}");
 }
- 
+
 /// D3 at non-zero s — verifies the AD machinery correctly differentiates
 /// the implemented polynomial at a representative s.  IMPORTANT: s_val
 /// MUST be below `TAYLOR_THRESHOLD_S`.  Above threshold the function
@@ -1176,7 +1174,7 @@ fn half_sinc_half_third_derivative_via_d3_matches_taylor() {
 #[test]
 fn cos_half_third_derivative_via_d3_at_nonzero_s() {
     use crate::autodiff::nested_ad::Dual;
- 
+
     let s_val: f64 = 5e-5;
     let l1 = Dual::<f64, 1>::seed(s_val, 0);
     let l2 = Dual::<Dual<f64, 1>, 1>::seed(l1, 0);
@@ -1184,18 +1182,21 @@ fn cos_half_third_derivative_via_d3_at_nonzero_s() {
     let theta = Dual::<Dual<Dual<f64, 1>, 1>, 1>::constant(s_val.sqrt());
     let r = scalar_cos_half_s(l3, theta);
     let f3 = r.tangent[0].tangent[0].tangent[0];
- 
+
     // f'''_poly(s) = 6·(−1/46080) + 24·(1/10321920)·s
     //              = −1/7680 + s/430080
-    let expected = -1.0/7680.0 + s_val/430080.0;
+    let expected = -1.0 / 7680.0 + s_val / 430080.0;
     let rel = (f3 - expected).abs() / expected.abs();
-    assert!(rel < 1e-13, "f'''(s={s_val})={f3:.6e}, expected {expected:.6e}, rel {rel:.2e}");
+    assert!(
+        rel < 1e-13,
+        "f'''(s={s_val})={f3:.6e}, expected {expected:.6e}, rel {rel:.2e}"
+    );
 }
- 
+
 #[test]
 fn half_sinc_half_third_derivative_via_d3_at_nonzero_s() {
     use crate::autodiff::nested_ad::Dual;
- 
+
     let s_val: f64 = 5e-5; // below TAYLOR_THRESHOLD_S; see note above
     let l1 = Dual::<f64, 1>::seed(s_val, 0);
     let l2 = Dual::<Dual<f64, 1>, 1>::seed(l1, 0);
@@ -1203,10 +1204,13 @@ fn half_sinc_half_third_derivative_via_d3_at_nonzero_s() {
     let theta = Dual::<Dual<Dual<f64, 1>, 1>, 1>::constant(s_val.sqrt());
     let r = scalar_half_sinc_half_s(l3, theta);
     let f3 = r.tangent[0].tangent[0].tangent[0];
- 
+
     // f'''_poly(s) = 6·(−1/645120) + 24·(1/185794560)·s
     //              = −1/107520 + s/7741440
-    let expected = -1.0/107520.0 + s_val/7741440.0;
+    let expected = -1.0 / 107520.0 + s_val / 7741440.0;
     let rel = (f3 - expected).abs() / expected.abs();
-    assert!(rel < 1e-13, "f'''(s={s_val})={f3:.6e}, expected {expected:.6e}, rel {rel:.2e}");
+    assert!(
+        rel < 1e-13,
+        "f'''(s={s_val})={f3:.6e}, expected {expected:.6e}, rel {rel:.2e}"
+    );
 }

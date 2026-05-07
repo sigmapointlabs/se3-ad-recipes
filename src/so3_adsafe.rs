@@ -626,7 +626,7 @@ pub fn scalar_cos_half_s<T: AD>(s: T, theta: T) -> T {
         (T::constant(0.5) * theta).cos()
     }
 }
- 
+
 /// (1/2)·sinc(θ/2) ≡ sin(θ/2)/θ, reached from (s, θ).  Builds the vector
 /// quaternion components of q = (cos(θ/2), sin(θ/2)·ω̂):
 ///

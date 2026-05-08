@@ -2,7 +2,8 @@
 
 [![Rust CI](https://github.com/sigmapointlabs/se3-ad-recipes/actions/workflows/rust-tests.yml/badge.svg)](https://github.com/sigmapointlabs/se3-ad-recipes/actions/workflows/rust-tests.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
-[![Rust edition: 2021](https://img.shields.io/badge/rust-2021-orange.svg)](https://doc.rust-lang.org/edition-guide/rust-2021/index.html)
+[![Rust edition: 2024](https://img.shields.io/badge/rust-2024-orange.svg)](https://doc.rust-lang.org/edition-guide/rust-2024/index.html)
+[![Release](https://img.shields.io/github/v/release/sigmapointlabs/se3-ad-recipes)](https://github.com/sigmapointlabs/se3-ad-recipes/releases)
 
 Companion code for the arXiv preprint *"Exact Higher-Order Derivatives for SE(3) via Analytical/AD Methods."*
 

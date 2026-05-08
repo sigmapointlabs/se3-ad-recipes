@@ -1,0 +1,51 @@
+cff-version: 1.2.0
+message: >-
+  If you use this software, please cite both the companion paper
+  (preferred-citation, below) and this software release.
+type: software
+title: "se3-ad-recipes"
+abstract: >-
+  Companion code for the arXiv preprint "Exact Higher-Order
+  Derivatives for SE(3) via Analytical/AD Methods." Implements eight
+  independent ways to compute the same 6×6 SE(3) negative-log-likelihood
+  Hessian, including the s = θ² parameterised AD-safe scalar recipe,
+  fused removable-singularity atoms (β̄, D̃, β̄', cos(θ/2), sin(θ/2)/θ),
+  and an automatic forward-over-reverse path via a custom reverse tape
+  with adfn<6> partials.
+authors:
+  - family-names: Kuehnel
+    given-names: "Frank O."
+    affiliation: SigmapointLabs
+repository-code: "https://github.com/sigmapointlabs/se3-ad-recipes"
+url: "https://github.com/sigmapointlabs/se3-ad-recipes"
+license:
+  - MIT
+  - Apache-2.0
+version: 0.1.0
+date-released: "2026-05-07"
+keywords:
+  - SE(3)
+  - Lie groups
+  - automatic differentiation
+  - higher-order derivatives
+  - Hessian
+  - state estimation
+  - robotics
+  - numerical analysis
+preferred-citation:
+  type: article
+  title: "Exact Higher-Order Derivatives for SE(3) via Analytical/AD Methods"
+  authors:
+    - family-names: Kuehnel
+      given-names: "Frank O."
+  year: 2026
+  month: 5
+  doi: "10.48550/arXiv.2605.02252"
+  url: "https://arxiv.org/abs/2605.02252"
+  identifiers:
+    - type: other
+      value: "arXiv:2605.02252"
+      description: arXiv preprint identifier
+    - type: other
+      value: "cs.RO"
+      description: arXiv primary subject classification (Robotics)

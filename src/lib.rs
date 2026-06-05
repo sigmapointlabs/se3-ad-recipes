@@ -29,7 +29,9 @@
 
 pub mod autodiff;
 pub mod jacobians_ad;
+pub mod jacobians_se23_adsafe;
 pub mod projective;
+pub mod se23_adsafe;
 pub mod se3_adsafe;
 pub mod se3_unsafe;
 pub mod so3_adsafe;

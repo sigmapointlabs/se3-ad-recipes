@@ -207,6 +207,90 @@ pub fn reprojection_error(z: &[f64; 2], xp: &Vec3) -> [f64; 2] {
     [z[0] - pi[0], z[1] - pi[1]]
 }
 
+// =========================================================================
+// AD-generic versions of the projective primitives
+// =========================================================================
+//
+// These mirror the f64 functions above but carry an `<T: AD>` so callers
+// can lift the projection chain through forward- or reverse-mode AD.
+// Used by `se3-estimation::pose_gradient::pose_hessian_ad_laplace` to
+// compute the pose Hessian via seeded forward AD of an analytical
+// gradient (1 AD eval, machine precision) in place of finite-difference
+// of the gradient (12 evals, FD truncation error).
+//
+// Arithmetic is inline (no helper crate dependency) to keep this module
+// self-contained.  The f64 versions stay intact — call sites that
+// don't need AD see no signature change.
+
+use crate::autodiff::ad_trait::AD;
+use crate::so3_adsafe::{Mat3G, Vec3G, hat_g};
+
+/// `<T: AD>` version of [`project`].  NaN-degenerate path uses the
+/// primal (`to_constant()`) for the `is_finite` / near-zero test —
+/// the AD types' arithmetic doesn't expose `is_finite()`.
+pub fn project_g<T: AD>(xp: &Vec3G<T>) -> [T; 2] {
+    let z_primal = xp[2].to_constant();
+    if !z_primal.is_finite() || z_primal.abs() <= 1e-12 {
+        return [T::constant(f64::NAN), T::constant(f64::NAN)];
+    }
+    let inv_z = T::constant(1.0) / xp[2];
+    [xp[0] * inv_z, xp[1] * inv_z]
+}
+
+/// `<T: AD>` version of [`project_jacobian`].
+pub fn project_jacobian_g<T: AD>(xp: &Vec3G<T>) -> [[T; 3]; 2] {
+    let inv_z = T::constant(1.0) / xp[2];
+    let u = xp[0] * inv_z;
+    let v = xp[1] * inv_z;
+    let zero = T::constant(0.0);
+    [[inv_z, zero, -(u * inv_z)], [zero, inv_z, -(v * inv_z)]]
+}
+
+/// `<T: AD>` version of [`project_hessian`].
+pub fn project_hessian_g<T: AD>(xp: &Vec3G<T>) -> (Mat3G<T>, Mat3G<T>) {
+    let z = xp[2];
+    let z2 = z * z;
+    let inv_z2 = T::constant(1.0) / z2;
+    let u = xp[0] / z;
+    let v = xp[1] / z;
+    let zero = T::constant(0.0);
+    let two = T::constant(2.0);
+
+    let h_u = [
+        [zero, zero, -inv_z2],
+        [zero, zero, zero],
+        [-inv_z2, zero, two * u * inv_z2],
+    ];
+    let h_v = [
+        [zero, zero, zero],
+        [zero, zero, -inv_z2],
+        [zero, -inv_z2, two * v * inv_z2],
+    ];
+    (h_u, h_v)
+}
+
+/// `<T: AD>` version of [`transform_point`] (`x' = R·x + T`).
+pub fn transform_point_g<T: AD>(rot: &Mat3G<T>, trans: &Vec3G<T>, x: &Vec3G<T>) -> Vec3G<T> {
+    [
+        rot[0][0] * x[0] + rot[0][1] * x[1] + rot[0][2] * x[2] + trans[0],
+        rot[1][0] * x[0] + rot[1][1] * x[1] + rot[1][2] * x[2] + trans[1],
+        rot[2][0] * x[0] + rot[2][1] * x[1] + rot[2][2] * x[2] + trans[2],
+    ]
+}
+
+/// `<T: AD>` version of [`j_cross`]: the 3×6 right-perturbation Jacobian
+/// `[-[x]×, I]` of the SE(3) action on `x`.
+pub fn j_cross_g<T: AD>(x: &Vec3G<T>) -> [[T; 6]; 3] {
+    let hx = hat_g(x);
+    let one = T::constant(1.0);
+    let zero = T::constant(0.0);
+    [
+        [-hx[0][0], -hx[0][1], -hx[0][2], one, zero, zero],
+        [-hx[1][0], -hx[1][1], -hx[1][2], zero, one, zero],
+        [-hx[2][0], -hx[2][1], -hx[2][2], zero, zero, one],
+    ]
+}
+
 /// Negative log-likelihood for one observation (up to constant).
 ///
 /// ℓ(f, x) = ½ (z - π(f⋆x))^T Σ_zz^{-1} (z - π(f⋆x))
@@ -806,5 +890,75 @@ mod tests {
             "Analytical Q₄ should be nonzero: {:.2e}",
             q4
         );
+    }
+
+    // ── Parity: _g (AD-generic) at T=f64 must match the f64 versions ──
+
+    #[test]
+    fn project_g_matches_f64() {
+        let cases = [
+            [1.0, 2.0, 5.0],
+            [-0.3, 0.7, 4.2],
+            [0.0, 0.0, 1.0],
+            [1.5, -0.8, 4.0],
+        ];
+        for xp in &cases {
+            let f = project(xp);
+            let g = project_g::<f64>(xp);
+            assert!((f[0] - g[0]).abs() < 1e-15 && (f[1] - g[1]).abs() < 1e-15);
+        }
+    }
+
+    #[test]
+    fn project_jacobian_g_matches_f64() {
+        let xp = [1.5, -0.8, 4.0];
+        let f = project_jacobian(&xp);
+        let g = project_jacobian_g::<f64>(&xp);
+        for i in 0..2 {
+            for j in 0..3 {
+                assert!((f[i][j] - g[i][j]).abs() < 1e-15);
+            }
+        }
+    }
+
+    #[test]
+    fn project_hessian_g_matches_f64() {
+        let xp = [0.7, -0.4, 3.5];
+        let (fu, fv) = project_hessian(&xp);
+        let (gu, gv) = project_hessian_g::<f64>(&xp);
+        for i in 0..3 {
+            for j in 0..3 {
+                assert!((fu[i][j] - gu[i][j]).abs() < 1e-15);
+                assert!((fv[i][j] - gv[i][j]).abs() < 1e-15);
+            }
+        }
+    }
+
+    #[test]
+    fn transform_point_g_matches_f64() {
+        let rot = [
+            [0.95, -0.31, 0.05],
+            [0.30, 0.94, 0.13],
+            [-0.09, -0.11, 0.99],
+        ];
+        let trans = [1.0, -0.5, 2.0];
+        let x = [0.3, 0.7, -0.2];
+        let f = transform_point(&rot, &trans, &x);
+        let g = transform_point_g::<f64>(&rot, &trans, &x);
+        for i in 0..3 {
+            assert!((f[i] - g[i]).abs() < 1e-15);
+        }
+    }
+
+    #[test]
+    fn j_cross_g_matches_f64() {
+        let x = [0.4, -0.7, 1.3];
+        let f = j_cross(&x);
+        let g = j_cross_g::<f64>(&x);
+        for i in 0..3 {
+            for j in 0..6 {
+                assert!((f[i][j] - g[i][j]).abs() < 1e-15);
+            }
+        }
     }
 }

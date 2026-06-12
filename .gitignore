@@ -9,3 +9,6 @@
 # Optional: per-developer IDE config (uncomment if your team uses these)
 # /.vscode/
 # /.idea/
+# Local AI agent guidance (per-developer, not for remote)
+/CLAUDE.md
+/docs/superpowers/

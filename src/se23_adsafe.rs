@@ -211,6 +211,54 @@ impl<T: AD> ExtendedPoseG<T> {
         let pos = [z - rt_p[0], z - rt_p[1], z - rt_p[2]];
         ExtendedPoseG { rot, vel, pos }
     }
+
+    // ─── Channel-specific point actions ─────────────────────────────────
+    //
+    // SE_2(3) has two natural "point action" channels because the group
+    // carries two ℝ³ offsets (position p, velocity v) sharing one rotation R.
+    // The two channels are exposed as separate inherent methods rather than
+    // routed through the [`crate::act::Act`] trait — that trait is reserved
+    // for SE(3) types where "the point action" is unambiguous.
+
+    /// Position-channel point action: `y = R·x + p`.
+    ///
+    /// The natural transform of a 3D position by an SE_2(3) state.
+    #[inline]
+    pub fn act_position(&self, x: &Vec3G<T>) -> Vec3G<T> {
+        let rx = mv3_g(&self.rot, x);
+        [
+            rx[0] + self.pos[0],
+            rx[1] + self.pos[1],
+            rx[2] + self.pos[2],
+        ]
+    }
+
+    /// Inverse position-channel action: `x = Rᵀ·(y − p)`.
+    #[inline]
+    pub fn act_position_inverse(&self, x: &Vec3G<T>) -> Vec3G<T> {
+        let dx = [x[0] - self.pos[0], x[1] - self.pos[1], x[2] - self.pos[2]];
+        mv3_g(&transpose3_g(&self.rot), &dx)
+    }
+
+    /// Velocity-channel point action: `y = R·x + v`.
+    ///
+    /// The natural transform of a 3D velocity by an SE_2(3) state.
+    #[inline]
+    pub fn act_velocity(&self, x: &Vec3G<T>) -> Vec3G<T> {
+        let rx = mv3_g(&self.rot, x);
+        [
+            rx[0] + self.vel[0],
+            rx[1] + self.vel[1],
+            rx[2] + self.vel[2],
+        ]
+    }
+
+    /// Inverse velocity-channel action: `x = Rᵀ·(y − v)`.
+    #[inline]
+    pub fn act_velocity_inverse(&self, x: &Vec3G<T>) -> Vec3G<T> {
+        let dx = [x[0] - self.vel[0], x[1] - self.vel[1], x[2] - self.vel[2]];
+        mv3_g(&transpose3_g(&self.rot), &dx)
+    }
 }
 
 #[cfg(test)]
@@ -452,5 +500,112 @@ mod tests {
         };
         let omega_out = so3_log_g::<f64>(&g.rot);
         assert!(approx_eq_vec3(&omega_in, &omega_out, 1e-10));
+    }
+
+    // ─── Channel-specific point actions (act_position / act_velocity) ──
+
+    /// New inherent `act_position` agrees with the test-private
+    /// `act_on_point` helper bit-for-bit (same field order, same ops).
+    #[test]
+    fn act_position_matches_act_on_point_helper() {
+        let g = ExtendedPose::exp(&[0.30, -0.20, 0.40, 1.0, 2.0, 3.0, 0.50, -0.30, 0.70]);
+        let test_points: [Vec3; 3] = [[1.0, 2.0, 3.0], [-0.5, 1.5, -2.0], [0.0, 0.0, 1.0]];
+        for x in &test_points {
+            let y_helper = act_on_point(&g, x);
+            let y_method = g.act_position(x);
+            assert_eq!(y_helper, y_method);
+        }
+    }
+
+    /// Sanity: when v ≠ p, the two channel actions must produce different
+    /// outputs.  Guards against a copy-paste bug where act_velocity
+    /// accidentally references self.pos.
+    #[test]
+    fn act_position_and_act_velocity_use_distinct_channels() {
+        let g = ExtendedPoseG::<f64> {
+            rot: I3,
+            vel: [10.0, 20.0, 30.0],
+            pos: [-1.0, -2.0, -3.0],
+        };
+        let x = [0.5, 0.5, 0.5];
+        let y_pos = g.act_position(&x);
+        let y_vel = g.act_velocity(&x);
+        // Difference must equal pos − vel exactly (since R = I).
+        for i in 0..3 {
+            assert!((y_pos[i] - y_vel[i] - (g.pos[i] - g.vel[i])).abs() < 1e-15);
+        }
+        // And they must not be equal.
+        assert!(!approx_eq_vec3(&y_pos, &y_vel, 1e-10));
+    }
+
+    #[test]
+    fn act_position_roundtrips_through_inverse() {
+        let g = ExtendedPose::exp(&[0.30, -0.20, 0.40, 1.0, 2.0, 3.0, 0.50, -0.30, 0.70]);
+        let x: Vec3 = [0.8, -1.2, 2.5];
+        let y = g.act_position(&x);
+        let x_back = g.act_position_inverse(&y);
+        for i in 0..3 {
+            assert!((x[i] - x_back[i]).abs() < 1e-14);
+        }
+    }
+
+    #[test]
+    fn act_velocity_roundtrips_through_inverse() {
+        let g = ExtendedPose::exp(&[0.30, -0.20, 0.40, 1.0, 2.0, 3.0, 0.50, -0.30, 0.70]);
+        let x: Vec3 = [0.8, -1.2, 2.5];
+        let y = g.act_velocity(&x);
+        let x_back = g.act_velocity_inverse(&y);
+        for i in 0..3 {
+            assert!((x[i] - x_back[i]).abs() < 1e-14);
+        }
+    }
+
+    /// AD finiteness guard at the chart origin under depth-2 nested AD —
+    /// mirrors `act::tests::act_finite_under_d2_at_origin`.
+    #[test]
+    fn act_channels_finite_under_d2_at_origin() {
+        use crate::autodiff::nested_ad::Dual;
+
+        type D2<const N: usize> = Dual<Dual<f64, N>, N>;
+
+        let delta: [D2<9>; 9] = std::array::from_fn(|i| {
+            let inner = Dual::<f64, 9>::seed(0.0, i);
+            D2::<9>::seed(inner, i)
+        });
+        let g = ExtendedPoseG::<D2<9>>::exp(&delta);
+        let x: [D2<9>; 3] = [
+            D2::<9>::constant(1.0),
+            D2::<9>::constant(2.0),
+            D2::<9>::constant(3.0),
+        ];
+
+        let outputs = [
+            g.act_position(&x),
+            g.act_position_inverse(&x),
+            g.act_velocity(&x),
+            g.act_velocity_inverse(&x),
+        ];
+
+        for (k, y) in outputs.iter().enumerate() {
+            for i in 0..3 {
+                assert!(y[i].value.value.is_finite(), "method {k} primal NaN at {i}");
+                for j in 0..9 {
+                    assert!(
+                        y[i].value.tangent[j].is_finite(),
+                        "method {k} 1st-tangent NaN at ({i},{j})"
+                    );
+                    assert!(
+                        y[i].tangent[j].value.is_finite(),
+                        "method {k} 2nd-tangent value NaN at ({i},{j})"
+                    );
+                    for kk in 0..9 {
+                        assert!(
+                            y[i].tangent[j].tangent[kk].is_finite(),
+                            "method {k} Hessian NaN at ({i},{j},{kk})"
+                        );
+                    }
+                }
+            }
+        }
     }
 }

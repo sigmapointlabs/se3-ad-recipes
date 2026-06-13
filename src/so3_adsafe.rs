@@ -44,6 +44,17 @@ pub fn norm3_g<T: AD>(v: &Vec3G<T>) -> T {
     dot3_g(v, v).sqrt()
 }
 
+/// AD-generic 3D cross product `a × b`.  The `<T: AD>` analogue of
+/// [`crate::cross3`].
+#[inline]
+pub fn cross3_g<T: AD>(a: &Vec3G<T>, b: &Vec3G<T>) -> Vec3G<T> {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
 #[inline]
 pub fn hat_g<T: AD>(w: &Vec3G<T>) -> Mat3G<T> {
     let z = T::constant(0.0);
@@ -130,7 +141,7 @@ pub fn trace3_g<T: AD>(m: &Mat3G<T>) -> T {
 // =========================================================================
 
 /// Single Taylor / exact crossover used by every branch in this module.
-const TAYLOR_THRESHOLD_S: f64 = 1e-4;
+pub(crate) const TAYLOR_THRESHOLD_S: f64 = 1e-4;
 
 /// Compute s = θ² = ωᵀω and (when safe) θ = √s from ω.
 ///
@@ -436,7 +447,7 @@ pub fn jr_inv_g<T: AD>(omega: &Vec3G<T>) -> Mat3G<T> {
 /// part of `{trace, R[i][i]}` to pick the most numerically stable component
 /// to take a square root of, then derives the remaining three from algebraic
 /// identities — no trig, no `acos`, AD-safe through the body.
-fn mat3_to_quat_shepperd_g<T: AD>(r: &Mat3G<T>) -> (T, Vec3G<T>) {
+pub fn mat3_to_quat_shepperd_g<T: AD>(r: &Mat3G<T>) -> (T, Vec3G<T>) {
     let trace = trace3_g(r);
     let trace_c = trace.to_constant();
     let r00_c = r[0][0].to_constant();
@@ -665,6 +676,40 @@ pub fn scalar_half_sinc_half_s<T: AD>(s: T, theta: T) -> T {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── cross3_g ────────────────────────────────────────────────────────
+
+    #[test]
+    fn cross3_g_standard_basis_cycles() {
+        let e1: Vec3G<f64> = [1.0, 0.0, 0.0];
+        let e2: Vec3G<f64> = [0.0, 1.0, 0.0];
+        let e3: Vec3G<f64> = [0.0, 0.0, 1.0];
+        assert_eq!(cross3_g(&e1, &e2), e3);
+        assert_eq!(cross3_g(&e2, &e3), e1);
+        assert_eq!(cross3_g(&e3, &e1), e2);
+    }
+
+    #[test]
+    fn cross3_g_is_anticommutative() {
+        let a: Vec3G<f64> = [1.0, 2.0, 3.0];
+        let b: Vec3G<f64> = [-0.5, 0.7, 1.1];
+        let ab = cross3_g(&a, &b);
+        let ba = cross3_g(&b, &a);
+        for i in 0..3 {
+            assert!((ab[i] + ba[i]).abs() < 1e-15);
+        }
+    }
+
+    #[test]
+    fn cross3_g_matches_lib_cross3_for_f64() {
+        let a = [1.3, -0.7, 2.1];
+        let b = [-0.4, 1.5, 0.9];
+        let g = cross3_g::<f64>(&a, &b);
+        let f = crate::cross3(&a, &b);
+        for i in 0..3 {
+            assert_eq!(g[i], f[i]);
+        }
+    }
 
     #[test]
     fn beta_bar_taylor_matches_at_threshold_boundary() {

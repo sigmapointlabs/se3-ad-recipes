@@ -13,11 +13,15 @@
 //! many poses, or interop with libraries (manif, GTSAM, Sophus) that
 //! standardise on quaternions.
 //!
-//! Storage is the only durable win.  Composition cost is comparable to
-//! `PoseG` — the translation transform `R(q)·v` via the algebraic identity
-//! `v + 2 q0 (qv × v) + 2 qv × (qv × v)` is ~24 flops vs. the 27 of
-//! `mm3_g`'s matrix-vector — and `to_pose_g` materialises R anyway when
-//! needed.
+//! Storage is the only durable win.  The translation transform `R(q)·v`
+//! via the algebraic identity `v + 2 q0 (qv × v) + 2 qv × (qv × v)` is
+//! ~30 flops, vs ~15 for `mv3_g`'s 3×3 matrix-vector — so the per-point
+//! action itself is cheaper with a materialised R.  Quaternions still
+//! win on storage (7 vs 12 scalars), on rotation × rotation composition,
+//! and on renormalisation.  When acting on multiple points with the
+//! same pose, prefer `self.to_pose_g().act(&x)` repeatedly: the ~24-flop
+//! R rebuild plus ~15 flops/point crosses under the direct path at
+//! N ≥ 2 points.
 //!
 //! ## AD safety
 //!
@@ -74,16 +78,9 @@
 use crate::autodiff::ad_trait::AD;
 use crate::se3_adsafe::PoseG;
 use crate::so3_adsafe::{
-    Mat3G, Vec3G, cross3_g, dot3_g, mat3_to_quat_shepperd_g, mv3_g,
-    scalar_cos_half_s, scalar_half_sinc_half_s, theta_sq_from_omega,
-    v_inv_g, v_matrix_g, TAYLOR_THRESHOLD_S,
+    Mat3G, TAYLOR_THRESHOLD_S, Vec3G, cross3_g, dot3_g, mat3_to_quat_shepperd_g, mv3_g,
+    scalar_cos_half_s, scalar_half_sinc_half_s, theta_sq_from_omega, v_inv_g, v_matrix_g,
 };
-
-// `cross3_g`, `mat3_to_quat_shepperd_g`, and `TAYLOR_THRESHOLD_S` need to be
-// `pub` (or `pub(crate)`) in `so3_adsafe` for this module to use them.
-// `mat3_to_quat_shepperd_g` is currently a private helper of
-// `so3_log_g_quaternion`; promote it to `pub(crate)`.  `TAYLOR_THRESHOLD_S`
-// is currently private; promote it likewise.
 
 // =========================================================================
 // PoseQ — quaternion-storage SE(3) pose
@@ -124,7 +121,11 @@ impl<T: AD> PoseQ<T> {
         let (s, theta) = theta_sq_from_omega(&omega);
         let q0 = scalar_cos_half_s(s, theta);
         let half_sinc = scalar_half_sinc_half_s(s, theta);
-        let qv = [omega[0] * half_sinc, omega[1] * half_sinc, omega[2] * half_sinc];
+        let qv = [
+            omega[0] * half_sinc,
+            omega[1] * half_sinc,
+            omega[2] * half_sinc,
+        ];
         let v = v_matrix_g(&omega);
         let trans = mv3_g(&v, &t);
         Self { q0, qv, trans }
@@ -141,7 +142,10 @@ impl<T: AD> PoseQ<T> {
     pub fn log(&self) -> Vec6G<T> {
         let (q0, qv) = if self.q0.to_constant() < 0.0 {
             let neg = T::constant(-1.0);
-            (neg * self.q0, [neg * self.qv[0], neg * self.qv[1], neg * self.qv[2]])
+            (
+                neg * self.q0,
+                [neg * self.qv[0], neg * self.qv[1], neg * self.qv[2]],
+            )
         } else {
             (self.q0, self.qv)
         };
@@ -198,15 +202,26 @@ impl<T: AD> PoseQ<T> {
         let neg = T::constant(-1.0);
         let q0_inv = self.q0;
         let qv_inv = [neg * self.qv[0], neg * self.qv[1], neg * self.qv[2]];
-        let neg_t = [neg * self.trans[0], neg * self.trans[1], neg * self.trans[2]];
+        let neg_t = [
+            neg * self.trans[0],
+            neg * self.trans[1],
+            neg * self.trans[2],
+        ];
         let trans = quat_rotate_vec(q0_inv, &qv_inv, &neg_t);
-        PoseQ { q0: q0_inv, qv: qv_inv, trans }
+        PoseQ {
+            q0: q0_inv,
+            qv: qv_inv,
+            trans,
+        }
     }
 
     /// Bridge to [`PoseG`].  Builds R from the quaternion via the standard
     /// quadratic identity.
     pub fn to_pose_g(&self) -> PoseG<T> {
-        PoseG { rot: quat_to_rotmat(self.q0, &self.qv), trans: self.trans }
+        PoseG {
+            rot: quat_to_rotmat(self.q0, &self.qv),
+            trans: self.trans,
+        }
     }
 
     /// Bridge from [`PoseG`].  Extracts q via Shepperd, canonicalises q0 ≥ 0
@@ -220,7 +235,11 @@ impl<T: AD> PoseQ<T> {
         } else {
             (q0, qv)
         };
-        Self { q0, qv, trans: p.trans }
+        Self {
+            q0,
+            qv,
+            trans: p.trans,
+        }
     }
 }
 
@@ -338,8 +357,12 @@ mod tests {
             let p = PoseQ::<f64>::exp(&xi);
             let xi_back = p.log();
             for i in 0..6 {
-                assert!((xi[i] - xi_back[i]).abs() < 1e-10,
-                    "xi={xi:?} component {i}: {} vs {}", xi[i], xi_back[i]);
+                assert!(
+                    (xi[i] - xi_back[i]).abs() < 1e-10,
+                    "xi={xi:?} component {i}: {} vs {}",
+                    xi[i],
+                    xi_back[i]
+                );
             }
         }
     }
@@ -355,10 +378,14 @@ mod tests {
             let pq = PoseQ::<f64>::exp(&xi);
             let pg = PoseG::<f64>::exp(&xi);
             let pq_as_g = pq.to_pose_g();
-            assert!(approx_eq_mat3(&pq_as_g.rot, &pg.rot, 1e-12),
-                "xi={xi:?}: rot mismatch");
-            assert!(approx_eq_vec3(&pq_as_g.trans, &pg.trans, 1e-12),
-                "xi={xi:?}: trans mismatch");
+            assert!(
+                approx_eq_mat3(&pq_as_g.rot, &pg.rot, 1e-12),
+                "xi={xi:?}: rot mismatch"
+            );
+            assert!(
+                approx_eq_vec3(&pq_as_g.trans, &pg.trans, 1e-12),
+                "xi={xi:?}: trans mismatch"
+            );
         }
     }
 
@@ -372,8 +399,14 @@ mod tests {
         let pb_g = PoseG::<f64>::exp(&xi_b);
         let c_q_as_g = pa_q.compose(&pb_q).to_pose_g();
         let c_g = pa_g.compose(&pb_g);
-        assert!(approx_eq_mat3(&c_q_as_g.rot, &c_g.rot, 1e-12), "rot mismatch");
-        assert!(approx_eq_vec3(&c_q_as_g.trans, &c_g.trans, 1e-12), "trans mismatch");
+        assert!(
+            approx_eq_mat3(&c_q_as_g.rot, &c_g.rot, 1e-12),
+            "rot mismatch"
+        );
+        assert!(
+            approx_eq_vec3(&c_q_as_g.trans, &c_g.trans, 1e-12),
+            "trans mismatch"
+        );
     }
 
     #[test]
@@ -397,10 +430,14 @@ mod tests {
             let pg = PoseG::<f64>::exp(&xi);
             let pq = PoseQ::<f64>::from_pose_g(&pg);
             let pg_back = pq.to_pose_g();
-            assert!(approx_eq_mat3(&pg.rot, &pg_back.rot, 1e-12),
-                "xi={xi:?}: rot bridge roundtrip");
-            assert!(approx_eq_vec3(&pg.trans, &pg_back.trans, 1e-12),
-                "xi={xi:?}: trans bridge roundtrip");
+            assert!(
+                approx_eq_mat3(&pg.rot, &pg_back.rot, 1e-12),
+                "xi={xi:?}: rot bridge roundtrip"
+            );
+            assert!(
+                approx_eq_vec3(&pg.trans, &pg_back.trans, 1e-12),
+                "xi={xi:?}: trans bridge roundtrip"
+            );
         }
     }
 
@@ -428,27 +465,41 @@ mod tests {
         let composed_g = pa_g.compose(&pb_g);
 
         let cmp = |a: D2<6>, b: D2<6>, label: &str| {
-            assert!((a.value.value - b.value.value).abs() < 1e-12,
-                "{label} value: q={} g={}", a.value.value, b.value.value);
+            assert!(
+                (a.value.value - b.value.value).abs() < 1e-12,
+                "{label} value: q={} g={}",
+                a.value.value,
+                b.value.value
+            );
             for i in 0..6 {
                 let dq = a.value.tangent[i];
                 let dg = b.value.tangent[i];
                 assert!((dq - dg).abs() < 1e-10, "{label} ∂[{i}]: q={dq} g={dg}");
             }
-            for i in 0..6 { for j in 0..6 {
-                let hq = a.tangent[i].tangent[j];
-                let hg = b.tangent[i].tangent[j];
-                assert!((hq - hg).abs() < 1e-9, "{label} ∂²[{i},{j}]: q={hq} g={hg}");
-            }}
+            for i in 0..6 {
+                for j in 0..6 {
+                    let hq = a.tangent[i].tangent[j];
+                    let hg = b.tangent[i].tangent[j];
+                    assert!((hq - hg).abs() < 1e-9, "{label} ∂²[{i},{j}]: q={hq} g={hg}");
+                }
+            }
         };
 
-        for i in 0..3 { for j in 0..3 {
-            cmp(composed_q_as_g.rot[i][j], composed_g.rot[i][j],
-                &format!("rot[{i}][{j}]"));
-        }}
         for i in 0..3 {
-            cmp(composed_q_as_g.trans[i], composed_g.trans[i],
-                &format!("trans[{i}]"));
+            for j in 0..3 {
+                cmp(
+                    composed_q_as_g.rot[i][j],
+                    composed_g.rot[i][j],
+                    &format!("rot[{i}][{j}]"),
+                );
+            }
+        }
+        for i in 0..3 {
+            cmp(
+                composed_q_as_g.trans[i],
+                composed_g.trans[i],
+                &format!("trans[{i}]"),
+            );
         }
     }
 
@@ -465,19 +516,25 @@ mod tests {
         let xi_back = p.log();
 
         for i in 0..6 {
-            assert!(xi_back[i].value.value.abs() < 1e-13,
-                "value[{i}] = {}", xi_back[i].value.value);
+            assert!(
+                xi_back[i].value.value.abs() < 1e-13,
+                "value[{i}] = {}",
+                xi_back[i].value.value
+            );
             for j in 0..6 {
                 let v = xi_back[i].value.tangent[j];
                 let exp = if i == j { 1.0 } else { 0.0 };
-                assert!((v - exp).abs() < 1e-11,
-                    "∂xi_back[{i}]/∂δ[{j}] = {v}, expected {exp}");
+                assert!(
+                    (v - exp).abs() < 1e-11,
+                    "∂xi_back[{i}]/∂δ[{j}] = {v}, expected {exp}"
+                );
             }
-            for j in 0..6 { for k in 0..6 {
-                let h = xi_back[i].tangent[j].tangent[k];
-                assert!(h.abs() < 1e-9,
-                    "∂²xi_back[{i}]/∂δ[{j}]∂δ[{k}] = {h}");
-            }}
+            for j in 0..6 {
+                for k in 0..6 {
+                    let h = xi_back[i].tangent[j].tangent[k];
+                    assert!(h.abs() < 1e-9, "∂²xi_back[{i}]/∂δ[{j}]∂δ[{k}] = {h}");
+                }
+            }
         }
     }
 }

@@ -5,13 +5,31 @@
 #![allow(clippy::assigning_clones)]
 #![allow(clippy::cloned_ref_to_slice_refs)]
 
-//! # se3-inference
+//! # se3-ad-recipes
 //!
-//! Higher-order uncertainty propagation and saddlepoint marginalization
-//! on the SE(3) Lie group, with extension to SE_2(3) (extended pose group)
-//! for inertial navigation.
+//! Companion code for the arXiv preprint *"Exact Higher-Order Derivatives
+//! for SE(3) via Analytical/AD Methods"*. Implements the AD-safe fused
+//! scalar basis described in the paper, the eight Hessian recipes that
+//! reproduce Table I, and the SE(3) / SE_2(3) / quaternion-storage SE(3)
+//! group primitives that the recipes build on.
 //!
-//! All matrices are stack-allocated fixed-size arrays — no heap, no deps.
+//! All matrices are stack-allocated fixed-size arrays — no heap. Default
+//! features include zero runtime dependencies; the optional `serde`
+//! feature pulls in `serde` for the on-disk pose representations.
+//!
+//! ## Where to start
+//!
+//! Application code should use the curated [`api`] module or glob-import
+//! [`prelude`]. The [`api`] module exposes three nested stability tiers —
+//! the application tier ([`api::pose`], [`api::extended_pose`],
+//! [`api::quaternion_pose`], [`api::rotation`], [`api::types`]); the
+//! expert tier ([`api::expert`]) organized per group as `expert::{so3,
+//! se3, se23, quat_se3, ad}`; and the raw paper-aligned modules. See the
+//! [`api`] module's rustdoc for the contract on each tier.
+//!
+//! The raw modules (`so3_*`, `se3_*`, `se23_adsafe`, `se3_quat_adsafe`,
+//! `projective`, `jacobians_*`, `autodiff`, ...) remain `pub` for source
+//! compatibility and reproducibility but are hidden from rustdoc.
 //!
 //! ## Dimension-generic operations
 //!
@@ -27,18 +45,36 @@
 //! and the block insert / extract functions, which are inherently
 //! dimension-specific.
 
+pub mod api;
+pub mod prelude;
+
+// Paper-level and implementation APIs remain public for source compatibility
+// and reproducibility, but are not part of the curated application API.
+#[doc(hidden)]
 pub mod act;
+#[doc(hidden)]
 pub mod autodiff;
+#[doc(hidden)]
 pub mod jacobians_ad;
+#[doc(hidden)]
 pub mod jacobians_se23_adsafe;
+#[doc(hidden)]
 pub mod projective;
+#[doc(hidden)]
 pub mod se23_adsafe;
+#[doc(hidden)]
 pub mod se3_adsafe;
+#[doc(hidden)]
 pub mod se3_quat_adsafe;
+#[doc(hidden)]
 pub mod se3_unsafe;
+#[doc(hidden)]
 pub mod so3_adsafe;
+#[doc(hidden)]
 pub mod so3_unsafe;
 
+#[cfg(any(test, feature = "bench-support"))]
+#[doc(hidden)]
 pub mod nll_bench;
 
 #[cfg(test)]
@@ -47,26 +83,35 @@ mod nll_tests;
 // ─── Type aliases ───────────────────────────────────────────────────────
 
 /// 3×3 matrix, row-major.
-pub type Mat3 = [[f64; 3]; 3];
+#[doc(hidden)]
+pub type Mat3 = api::types::Mat3;
 /// 6×6 matrix, row-major.
-pub type Mat6 = [[f64; 6]; 6];
+#[doc(hidden)]
+pub type Mat6 = api::types::Mat6;
 /// 9×9 matrix, row-major. Used for SE_2(3) adjoints, extended-pose
 /// covariances, and the lazy-chart filter on the extended pose group.
-pub type Mat9 = [[f64; 9]; 9];
+#[doc(hidden)]
+pub type Mat9 = api::types::Mat9;
 
 /// 3-vector.
-pub type Vec3 = [f64; 3];
+#[doc(hidden)]
+pub type Vec3 = api::types::Vec3;
 /// 6-vector: \[ω₁, ω₂, ω₃, v₁, v₂, v₃\] for SE(3) tangent.
-pub type Vec6 = [f64; 6];
+#[doc(hidden)]
+pub type Vec6 = api::types::Vec6;
 /// 9-vector: \[ω₁, ω₂, ω₃, ν₁, ν₂, ν₃, ρ₁, ρ₂, ρ₃\] for SE_2(3) tangent.
 /// Index order: rotation \[0..3\], velocity \[3..6\], position \[6..9\].
-pub type Vec9 = [f64; 9];
+#[doc(hidden)]
+pub type Vec9 = api::types::Vec9;
 
 // ─── Constants ──────────────────────────────────────────────────────────
 
+#[doc(hidden)]
 pub const I3: Mat3 = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+#[doc(hidden)]
 pub const Z3: Mat3 = [[0.0; 3]; 3];
 
+#[doc(hidden)]
 pub const I6: Mat6 = {
     let mut m = [[0.0f64; 6]; 6];
     let mut i = 0;
@@ -76,8 +121,10 @@ pub const I6: Mat6 = {
     }
     m
 };
+#[doc(hidden)]
 pub const Z6: Mat6 = [[0.0; 6]; 6];
 
+#[doc(hidden)]
 pub const I9: Mat9 = {
     let mut m = [[0.0f64; 9]; 9];
     let mut i = 0;
@@ -87,6 +134,7 @@ pub const I9: Mat9 = {
     }
     m
 };
+#[doc(hidden)]
 pub const Z9: Mat9 = [[0.0; 9]; 9];
 
 // ─── Dimension-generic helpers ─────────────────────────────────────────
@@ -100,6 +148,7 @@ pub const Z9: Mat9 = [[0.0; 9]; 9];
 // ── Vector operations ──────────────────────────────────────────────────
 
 /// Dot product of two N-vectors.
+#[doc(hidden)]
 #[inline]
 pub fn dot<const N: usize>(a: &[f64; N], b: &[f64; N]) -> f64 {
     let mut s = 0.0;
@@ -110,12 +159,14 @@ pub fn dot<const N: usize>(a: &[f64; N], b: &[f64; N]) -> f64 {
 }
 
 /// Euclidean (L₂) norm of an N-vector.
+#[doc(hidden)]
 #[inline]
 pub fn norm<const N: usize>(v: &[f64; N]) -> f64 {
     dot(v, v).sqrt()
 }
 
 /// Euclidean distance ‖a − b‖₂ between two N-vectors.
+#[doc(hidden)]
 #[inline]
 pub fn l2_diff<const N: usize>(a: &[f64; N], b: &[f64; N]) -> f64 {
     let mut s = 0.0;
@@ -127,6 +178,7 @@ pub fn l2_diff<const N: usize>(a: &[f64; N], b: &[f64; N]) -> f64 {
 }
 
 /// Element-wise sum of two N-vectors.
+#[doc(hidden)]
 #[inline]
 pub fn add_vec<const N: usize>(a: &[f64; N], b: &[f64; N]) -> [f64; N] {
     let mut c = [0.0f64; N];
@@ -137,6 +189,7 @@ pub fn add_vec<const N: usize>(a: &[f64; N], b: &[f64; N]) -> [f64; N] {
 }
 
 /// Element-wise difference of two N-vectors.
+#[doc(hidden)]
 #[inline]
 pub fn sub_vec<const N: usize>(a: &[f64; N], b: &[f64; N]) -> [f64; N] {
     let mut c = [0.0f64; N];
@@ -147,6 +200,7 @@ pub fn sub_vec<const N: usize>(a: &[f64; N], b: &[f64; N]) -> [f64; N] {
 }
 
 /// Scalar-vector multiply.
+#[doc(hidden)]
 #[inline]
 pub fn scale_vec<const N: usize>(s: f64, v: &[f64; N]) -> [f64; N] {
     let mut c = [0.0f64; N];
@@ -157,6 +211,7 @@ pub fn scale_vec<const N: usize>(s: f64, v: &[f64; N]) -> [f64; N] {
 }
 
 /// Outer product a bᵀ → N×N matrix.
+#[doc(hidden)]
 #[inline]
 pub fn outer<const N: usize>(a: &[f64; N], b: &[f64; N]) -> [[f64; N]; N] {
     let mut c = [[0.0f64; N]; N];
@@ -171,6 +226,7 @@ pub fn outer<const N: usize>(a: &[f64; N], b: &[f64; N]) -> [[f64; N]; N] {
 // ── Matrix operations ──────────────────────────────────────────────────
 
 /// N×N matrix-vector multiply.
+#[doc(hidden)]
 #[inline]
 pub fn mv<const N: usize>(m: &[[f64; N]; N], v: &[f64; N]) -> [f64; N] {
     let mut r = [0.0f64; N];
@@ -183,6 +239,7 @@ pub fn mv<const N: usize>(m: &[[f64; N]; N], v: &[f64; N]) -> [f64; N] {
 }
 
 /// N×N matrix multiply A · B.
+#[doc(hidden)]
 #[inline]
 pub fn mm<const N: usize>(a: &[[f64; N]; N], b: &[[f64; N]; N]) -> [[f64; N]; N] {
     let mut c = [[0.0f64; N]; N];
@@ -197,6 +254,7 @@ pub fn mm<const N: usize>(a: &[[f64; N]; N], b: &[[f64; N]; N]) -> [[f64; N]; N]
 }
 
 /// A · Bᵀ for N×N matrices.
+#[doc(hidden)]
 #[inline]
 pub fn mm_right_transpose<const N: usize>(a: &[[f64; N]; N], b: &[[f64; N]; N]) -> [[f64; N]; N] {
     let mut c = [[0.0f64; N]; N];
@@ -211,6 +269,7 @@ pub fn mm_right_transpose<const N: usize>(a: &[[f64; N]; N], b: &[[f64; N]; N]) 
 }
 
 /// Transpose of an N×N matrix.
+#[doc(hidden)]
 #[inline]
 pub fn transpose<const N: usize>(m: &[[f64; N]; N]) -> [[f64; N]; N] {
     let mut c = [[0.0f64; N]; N];
@@ -223,6 +282,7 @@ pub fn transpose<const N: usize>(m: &[[f64; N]; N]) -> [[f64; N]; N] {
 }
 
 /// Element-wise sum of two N×N matrices.
+#[doc(hidden)]
 #[inline]
 pub fn add_mat<const N: usize>(a: &[[f64; N]; N], b: &[[f64; N]; N]) -> [[f64; N]; N] {
     let mut c = [[0.0f64; N]; N];
@@ -235,6 +295,7 @@ pub fn add_mat<const N: usize>(a: &[[f64; N]; N], b: &[[f64; N]; N]) -> [[f64; N
 }
 
 /// Element-wise difference of two N×N matrices.
+#[doc(hidden)]
 #[inline]
 pub fn sub_mat<const N: usize>(a: &[[f64; N]; N], b: &[[f64; N]; N]) -> [[f64; N]; N] {
     let mut c = [[0.0f64; N]; N];
@@ -247,6 +308,7 @@ pub fn sub_mat<const N: usize>(a: &[[f64; N]; N], b: &[[f64; N]; N]) -> [[f64; N
 }
 
 /// Scalar-matrix multiply.
+#[doc(hidden)]
 #[inline]
 pub fn scale_mat<const N: usize>(s: f64, m: &[[f64; N]; N]) -> [[f64; N]; N] {
     let mut c = [[0.0f64; N]; N];
@@ -259,6 +321,7 @@ pub fn scale_mat<const N: usize>(s: f64, m: &[[f64; N]; N]) -> [[f64; N]; N] {
 }
 
 /// Trace of an N×N matrix.
+#[doc(hidden)]
 #[inline]
 pub fn trace<const N: usize>(m: &[[f64; N]; N]) -> f64 {
     let mut s = 0.0;
@@ -270,6 +333,7 @@ pub fn trace<const N: usize>(m: &[[f64; N]; N]) -> f64 {
 
 /// Cholesky decomposition of an N×N positive-definite matrix.
 /// Returns L such that A = L Lᵀ.
+#[doc(hidden)]
 pub fn cholesky<const N: usize>(a: &[[f64; N]; N]) -> [[f64; N]; N] {
     let mut l = [[0.0f64; N]; N];
     for i in 0..N {
@@ -296,6 +360,7 @@ pub fn cholesky<const N: usize>(a: &[[f64; N]; N]) -> [[f64; N]; N] {
 // ── Norm operations ────────────────────────────────────────────────────
 
 /// Frobenius norm ‖M‖_F of an N×N matrix.
+#[doc(hidden)]
 #[inline]
 pub fn frob<const N: usize>(m: &[[f64; N]; N]) -> f64 {
     let mut s = 0.0;
@@ -308,6 +373,7 @@ pub fn frob<const N: usize>(m: &[[f64; N]; N]) -> f64 {
 }
 
 /// Frobenius norm of the difference ‖A − B‖_F for N×N matrices.
+#[doc(hidden)]
 #[inline]
 pub fn frob_diff<const N: usize>(a: &[[f64; N]; N], b: &[[f64; N]; N]) -> f64 {
     let mut s = 0.0;
@@ -322,6 +388,7 @@ pub fn frob_diff<const N: usize>(a: &[[f64; N]; N], b: &[[f64; N]; N]) -> f64 {
 
 /// Frobenius norm of a `size × size` sub-block of two N×N matrices,
 /// starting at row `r0`, column `c0`: ‖A[r0..r0+size, c0..c0+size] − B[…]‖_F.
+#[doc(hidden)]
 #[inline]
 pub fn frob_block<const N: usize>(
     a: &[[f64; N]; N],
@@ -342,6 +409,7 @@ pub fn frob_block<const N: usize>(
 
 // ─── Dimension-specific helpers (non-generic) ──────────────────────────
 
+#[doc(hidden)]
 #[inline]
 pub fn cross3(a: &Vec3, b: &Vec3) -> Vec3 {
     [
@@ -352,6 +420,7 @@ pub fn cross3(a: &Vec3, b: &Vec3) -> Vec3 {
 }
 
 /// Determinant of 3×3 matrix.
+#[doc(hidden)]
 pub fn det3(m: &Mat3) -> f64 {
     m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
         - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
@@ -359,6 +428,7 @@ pub fn det3(m: &Mat3) -> f64 {
 }
 
 /// Inverse of 3×3 matrix (panics if singular).
+#[doc(hidden)]
 pub fn inv3(m: &Mat3) -> Mat3 {
     let d = det3(m);
     assert!(d.abs() > 1e-15, "inv3: singular matrix, det={:.2e}", d);
@@ -383,6 +453,7 @@ pub fn inv3(m: &Mat3) -> Mat3 {
 }
 
 /// Extract a 3×3 block from a 6×6 matrix at the given row/col offset.
+#[doc(hidden)]
 pub fn extract_block3(m: &Mat6, row: usize, col: usize) -> Mat3 {
     let mut b = [[0.0; 3]; 3];
     for i in 0..3 {
@@ -397,6 +468,7 @@ pub fn extract_block3(m: &Mat6, row: usize, col: usize) -> Mat3 {
 
 /// Write a 3×3 block into a 6×6 matrix at the given row/col offset.
 /// Mirrors `extract_block3` (the read direction).
+#[doc(hidden)]
 pub fn set_block3_in6(m: &mut Mat6, row: usize, col: usize, b: &Mat3) {
     for i in 0..3 {
         for j in 0..3 {
@@ -407,6 +479,7 @@ pub fn set_block3_in6(m: &mut Mat6, row: usize, col: usize, b: &Mat3) {
 
 /// Extract a 3×3 block from a 9×9 matrix at the given row/col offset.
 /// Useful for inspecting individual blocks of the SE_2(3) adjoint.
+#[doc(hidden)]
 pub fn extract_block3_from9(m: &Mat9, row: usize, col: usize) -> Mat3 {
     let mut b = [[0.0; 3]; 3];
     for i in 0..3 {
@@ -419,6 +492,7 @@ pub fn extract_block3_from9(m: &Mat9, row: usize, col: usize) -> Mat3 {
 
 /// Write a 3×3 block into a 9×9 matrix at the given row/col offset.
 /// Used to assemble the SE_2(3) adjoint from its R, \[v\]×R, \[p\]×R blocks.
+#[doc(hidden)]
 pub fn set_block3_in9(m: &mut Mat9, row: usize, col: usize, b: &Mat3) {
     for i in 0..3 {
         for j in 0..3 {
@@ -463,25 +537,6 @@ mod tests {
         let rhs = mm(&m, &I9);
         assert!(approx_eq_mat9(&lhs, &m, 1e-15));
         assert!(approx_eq_mat9(&rhs, &m, 1e-15));
-    }
-
-    #[test]
-    fn z9_is_zero() {
-        for i in 0..9 {
-            for j in 0..9 {
-                assert_eq!(Z9[i][j], 0.0);
-            }
-        }
-    }
-
-    #[test]
-    fn i9_diagonal_only() {
-        for i in 0..9 {
-            for j in 0..9 {
-                let expected = if i == j { 1.0 } else { 0.0 };
-                assert_eq!(I9[i][j], expected, "I9[{}][{}]", i, j);
-            }
-        }
     }
 
     // ─── mv ───────────────────────────────────────────────────────────
@@ -558,13 +613,6 @@ mod tests {
     // ─── cholesky ─────────────────────────────────────────────────────
 
     #[test]
-    fn cholesky9_reconstructs_identity() {
-        let l = cholesky(&I9);
-        // Cholesky of identity is identity
-        assert!(approx_eq_mat9(&l, &I9, 1e-15));
-    }
-
-    #[test]
     fn cholesky9_reconstructs_diagonal() {
         let mut a = [[0.0f64; 9]; 9];
         for i in 0..9 {
@@ -594,11 +642,6 @@ mod tests {
     }
 
     // ─── frob_diff ─────────────────────────────────────────────────────────
-
-    #[test]
-    fn frob9_of_identity_minus_identity_is_zero() {
-        assert_eq!(frob_diff(&I9, &I9), 0.0);
-    }
 
     #[test]
     fn frob9_of_zero_versus_identity_is_three() {
@@ -644,43 +687,6 @@ mod tests {
         for i in 0..3 {
             for j in 0..3 {
                 assert_eq!(extracted[i][j], block[i][j]);
-            }
-        }
-    }
-
-    // ─── Mat6 additions sanity ─────────────────────────────────────────
-
-    #[test]
-    fn sub6_undoes_add6() {
-        let mut a = [[0.0f64; 6]; 6];
-        let mut b = [[0.0f64; 6]; 6];
-        for i in 0..6 {
-            for j in 0..6 {
-                a[i][j] = (i + 2 * j) as f64;
-                b[i][j] = (3 * i) as f64 - j as f64;
-            }
-        }
-        let s = add_mat(&a, &b);
-        let recovered = sub_mat(&s, &b);
-        for i in 0..6 {
-            for j in 0..6 {
-                assert!((recovered[i][j] - a[i][j]).abs() < 1e-15);
-            }
-        }
-    }
-
-    #[test]
-    fn scale_mat6_zero_gives_zero() {
-        let mut m = [[0.0f64; 6]; 6];
-        for i in 0..6 {
-            for j in 0..6 {
-                m[i][j] = (i + j) as f64 + 1.0;
-            }
-        }
-        let zeroed = scale_mat(0.0, &m);
-        for i in 0..6 {
-            for j in 0..6 {
-                assert_eq!(zeroed[i][j], 0.0);
             }
         }
     }

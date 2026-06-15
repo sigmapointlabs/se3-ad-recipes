@@ -200,14 +200,14 @@ strips it before comparison); refresh it explicitly with the
 <!-- HESSIAN_TABLE_START -->
 | # | Method | LOC | Rel. err. vs. oracle | Time |
 |---|---|---|---|---|
-| 1 | FD of value (no AD) | 43 | 6.65e-3 | 329 μs |
-| 2 | FD of AD-gradient (baseline) | 30 | 9.18e-7 | 745 μs |
-| 6 | FD of analytical gradient (fused basis) | 104 | 9.18e-7 | 154 μs |
-| 3 | Nested AD, naïve basis | 118 | 3.34e-18 | 961 μs |
-| 4 | Nested AD, fused basis (oracle) | 30 | 0 (reference) | 999 μs |
+| 1 | FD of value (no AD) | 43 | 6.65e-3 | 332 μs |
+| 2 | FD of AD-gradient (baseline) | 30 | 9.18e-7 | 743 μs |
+| 6 | FD of analytical gradient (fused basis) | 104 | 9.18e-7 | 155 μs |
+| 3 | Nested AD, naïve basis | 118 | 3.34e-18 | 956 μs |
+| 4 | Nested AD, fused basis (oracle) | 30 | 0 (reference) | 993 μs |
 | 5 | Seeded AD of analytical gradient, naïve basis | (102) | NaN (depth-0 §IV.B trap) | — |
 | 7 | Seeded AD of analytical gradient, fused basis (recipe) | 102 | 1.30e-16 | 166 μs |
-| 8 | Auto FoR (`UnsafeCell` tape, no analytical grad) | 30 | 2.54e-16 | 409 μs |
+| 8 | Auto FoR (`UnsafeCell` tape, no analytical grad) | 30 | 2.54e-16 | 410 μs |
 <!-- HESSIAN_TABLE_END -->
 
 To populate or refresh after a code change:

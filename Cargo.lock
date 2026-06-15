@@ -402,9 +402,11 @@ dependencies = [
 
 [[package]]
 name = "se3-ad-recipes"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "criterion",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

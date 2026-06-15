@@ -169,10 +169,15 @@ pub fn dqr_t_slice_g<T: AD>(
     result
 }
 
+/// AD-generic SE(3) Jacobian derivative tensor: six 6×6 slices
+/// `[∂Jr/∂ξ_0, ..., ∂Jr/∂ξ_5]`. Re-exported as
+/// `api::expert::types::JacobianDerivative6` under a semantic name.
+pub type JacobianDerivative6G<T> = [Mat6G<T>; 6];
+
 /// AD-generic SE(3) inverse Jacobian derivative tensor.
 ///
 /// Returns T\[m\] = ∂(Jr^SE3)⁻¹/∂ξ_m as 6×6 matrices, m = 0..5.
-pub fn se3_jr_inv_derivative_g<T: AD>(xi: &Vec6G<T>) -> [Mat6G<T>; 6] {
+pub fn se3_jr_inv_derivative_g<T: AD>(xi: &Vec6G<T>) -> JacobianDerivative6G<T> {
     let omega: Vec3G<T> = [xi[0], xi[1], xi[2]];
     let t: Vec3G<T> = [xi[3], xi[4], xi[5]];
     let (s, theta) = theta_sq_from_omega(&omega);
@@ -198,7 +203,7 @@ pub fn se3_jr_inv_derivative_g<T: AD>(xi: &Vec6G<T>) -> [Mat6G<T>; 6] {
 }
 
 /// AD-generic forward Jacobian derivative tensor ∂Jr^{SE3}/∂ξ.
-pub fn se3_jr_derivative_g<T: AD>(xi: &Vec6G<T>) -> [Mat6G<T>; 6] {
+pub fn se3_jr_derivative_g<T: AD>(xi: &Vec6G<T>) -> JacobianDerivative6G<T> {
     let omega: Vec3G<T> = [xi[0], xi[1], xi[2]];
     let t: Vec3G<T> = [xi[3], xi[4], xi[5]];
     let (s, theta) = theta_sq_from_omega(&omega);
@@ -234,6 +239,46 @@ pub fn se3_jr_derivative_g<T: AD>(xi: &Vec6G<T>) -> [Mat6G<T>; 6] {
         tensor[m + 3] = blocks_6x6_g(&z3, &z3, &dll_tm, &z3);
     }
     tensor
+}
+
+/// Directional derivative of the SE(3) right Jacobian:
+/// `Σ_m direction[m] · ∂Jr/∂ξ_m`.
+///
+/// Equivalent to [`se3_jr_derivative_g`] contracted along its first
+/// index. Provided as a convenience for the single-direction case
+/// (Hessian-vector products in iterative solvers); when several
+/// directions are needed in a hot loop, compute the full tensor once
+/// and reuse it.
+pub fn se3_jr_directional_derivative_g<T: AD>(xi: &Vec6G<T>, direction: &Vec6G<T>) -> Mat6G<T> {
+    let tensor = se3_jr_derivative_g(xi);
+    let z = T::constant(0.0);
+    let mut result = [[z; 6]; 6];
+    for m in 0..6 {
+        for i in 0..6 {
+            for j in 0..6 {
+                result[i][j] += direction[m] * tensor[m][i][j];
+            }
+        }
+    }
+    result
+}
+
+/// Directional derivative of the SE(3) inverse right Jacobian:
+/// `Σ_m direction[m] · ∂Jr⁻¹/∂ξ_m`.
+///
+/// See [`se3_jr_directional_derivative_g`] for the use-case.
+pub fn se3_jr_inv_directional_derivative_g<T: AD>(xi: &Vec6G<T>, direction: &Vec6G<T>) -> Mat6G<T> {
+    let tensor = se3_jr_inv_derivative_g(xi);
+    let z = T::constant(0.0);
+    let mut result = [[z; 6]; 6];
+    for m in 0..6 {
+        for i in 0..6 {
+            for j in 0..6 {
+                result[i][j] += direction[m] * tensor[m][i][j];
+            }
+        }
+    }
+    result
 }
 
 // =========================================================================

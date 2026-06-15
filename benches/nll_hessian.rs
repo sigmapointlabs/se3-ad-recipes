@@ -13,7 +13,8 @@
 //!   5. `gradient_adfn6`        single `adfn<6>` gradient (cost reference)
 //!
 //! Method (5) is the "AD of seeded gradient" reference — *not* a Hessian
-//! method by itself.  Run `cargo bench --bench nll_hessian` to refresh.
+//! method by itself. Run `cargo bench --features bench-support --bench
+//! nll_hessian` to refresh.
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use se3_ad_recipes::Vec6;

@@ -2,7 +2,8 @@
 //!
 //! Graduated aggregation patterns for pose-graph estimation: between/prior
 //! factors, their AD-generic NLL and *analytical* gradient, a one-pass
-//! seeded-AD exact Hessian per factor, and a [`GraphProblem`] that assembles
+//! seeded-AD exact Hessian per factor, dense linearized couplings from
+//! marginalization ([`LinearFactor`]), and a [`GraphProblem`] that assembles
 //! the robust Gauss–Newton information and the exact observed information
 //! over a K-node graph.  Consumed by `examples/posegraph_consistency.rs`
 //! (the NEES consistency study, posegraph edition) and the in-tree tests.
@@ -25,10 +26,14 @@
 //!   reference `X_ref` is the same construction against a frozen endpoint:
 //!   `X_ref = X·Exp(r)`, `r = Log(X⁻¹·X_ref)` (a between factor with
 //!   `Z = I` and the reference as the fixed second node).
-//! - **Whitening is diagonal.** Each factor carries `sqrt_info_diag = L`
-//!   with `r_white = L∘r` (componentwise), `s = ‖L∘r‖²`. Gaussian factors
-//!   cost `½s`; robust factors cost the pseudo-Huber kernel
-//!   `κ²(√(1+s/κ²) − 1)` (see [`crate::nll_bench::pseudo_huber`]).
+//! - **Whitening is a square root of the information.** Each factor
+//!   carries `sqrt_info = L`, any matrix square root of the measurement
+//!   information `W = LᵀL` — a lower-triangular Cholesky factor for
+//!   correlated noise, or `diag(1/σ)` for the diagonal case (see
+//!   [`diagonal_sqrt_info`]).  The whitened residual is `r_w = L·r`,
+//!   `s = ‖L·r‖²`.  Gaussian factors cost `½s`; robust factors the
+//!   pseudo-Huber kernel `κ²(√(1+s/κ²) − 1)` (see
+//!   [`crate::nll_bench::pseudo_huber`]).
 //!
 //! # The one-pass exact Hessian (`between_hessian_seeded`)
 //!
@@ -54,37 +59,76 @@
 //! the global Hessian of the total NLL exactly (the NLL is a sum of factor
 //! terms, each touching only its own two nodes); the in-tree test pins this
 //! against a global nested-dual `D2<36>` oracle at ≤ 1e-12 relative.
+//!
+//! # Dense linearized couplings ([`LinearFactor`])
+//!
+//! Marginalizing shared variables at the current bases (landmarks in a
+//! GraphSLAM reduce step, an eliminated subchain) leaves quadratic
+//! "springs" between the surviving nodes: a gradient block and an
+//! information block with no `Z`-style measurement generating them.
+//! [`LinearFactor`] carries those blocks verbatim over any number of
+//! nodes.  It is a **chart-local** object — the blocks are the quadratic
+//! model `½ dᵀ·info·d + gradᵀ·d` in the tangents at the bases it was
+//! built from, so it must be rebuilt after every [`GraphProblem::re_base`]
+//! (exactly like re-linearizing the factors it summarizes).
 
 use crate::autodiff::ad_trait::AD;
 use crate::autodiff::forward_ad::adfn;
 use crate::nll_bench::pseudo_huber;
-use crate::se3_adsafe::{Mat6G, PoseG, Vec6G, adjoint_g, pose_to_g, se3_jr_g, se3_jr_inv_g};
+use crate::se3_adsafe::{Mat6G, PoseG, Vec6G, adjoint_g, mv6_g, pose_to_g, se3_jr_g, se3_jr_inv_g};
 use crate::se3_unsafe::{Pose, right_update};
-use crate::{Mat6, Vec6};
+use crate::{Mat6, Vec6, mm, mv};
 
 // ─── Factor types ────────────────────────────────────────────────────────
 
 /// Relative-pose factor between nodes `i` and `j`: measurement
-/// `Z ≈ X_i⁻¹·X_j`, diagonal whitening `L`, optional pseudo-Huber `κ`.
+/// `Z ≈ X_i⁻¹·X_j`, whitening `L` (`W = LᵀL`), optional pseudo-Huber `κ`.
 #[derive(Debug, Clone)]
 pub struct BetweenFactor {
     pub i: usize,
     pub j: usize,
     /// Measured relative pose `Z`.
     pub z: Pose,
-    /// Diagonal whitening `L = diag(1/σ)`: `s = ‖L∘r‖²`.
-    pub sqrt_info_diag: Vec6,
+    /// Square root `L` of the measurement information: `s = ‖L·r‖²`.
+    /// Use [`diagonal_sqrt_info`] for independent per-axis noise.
+    pub sqrt_info: Mat6,
     /// `None` → Gaussian `½s`; `Some(κ)` → pseudo-Huber `κ²(√(1+s/κ²)−1)`.
     pub kappa: Option<f64>,
 }
 
 /// Gaussian prior anchoring node `node` to `x_ref`:
-/// `r = Log(X⁻¹·X_ref)`, cost `½‖L∘r‖²`.
+/// `r = Log(X⁻¹·X_ref)`, cost `½‖L·r‖²`.
 #[derive(Debug, Clone)]
 pub struct PriorFactor {
     pub node: usize,
     pub x_ref: Pose,
-    pub sqrt_info_diag: Vec6,
+    /// Square root `L` of the prior information: `W = LᵀL`.
+    pub sqrt_info: Mat6,
+}
+
+/// Dense linearized coupling over `nodes`: the quadratic model
+/// `½ dᵀ·info·d + gradᵀ·d` in the stacked right perturbations of its
+/// nodes, valid **only at the bases it was built from** (rebuild after
+/// [`GraphProblem::re_base`]).  Being exactly quadratic, its Gauss–Newton
+/// information and exact Hessian coincide (`info` contributes to both).
+#[derive(Debug, Clone)]
+pub struct LinearFactor {
+    /// Global node indices, in the order the blocks are stacked.
+    pub nodes: Vec<usize>,
+    /// Gradient at `d = 0`, length `6·nodes.len()`.
+    pub grad: Vec<f64>,
+    /// Symmetric information block, `6·nodes.len()` square.
+    pub info: Vec<Vec<f64>>,
+}
+
+/// Whitening matrix for independent per-axis noise: `L = diag(entries)`
+/// with `entries = 1/σ` per tangent component.
+pub fn diagonal_sqrt_info(entries: &Vec6) -> Mat6 {
+    let mut l = [[0.0f64; 6]; 6];
+    for (a, e) in entries.iter().enumerate() {
+        l[a][a] = *e;
+    }
+    l
 }
 
 // ─── Small AD-generic helpers ────────────────────────────────────────────
@@ -98,6 +142,17 @@ fn mtv6_g<T: AD>(m: &Mat6G<T>, v: &Vec6G<T>) -> Vec6G<T> {
         }
         s
     })
+}
+
+/// Whitened square `s = ‖L·r‖²` and the pulled-back weight vector
+/// `Lᵀ·(L·r) = W·r`.
+fn whitened_square_g<T: AD>(l: &Mat6G<T>, r: &Vec6G<T>) -> (T, Vec6G<T>) {
+    let rw = mv6_g(l, r);
+    let mut s = T::constant(0.0);
+    for a in 0..6 {
+        s += rw[a] * rw[a];
+    }
+    (s, mtv6_g(l, &rw))
 }
 
 /// Perturbed error term shared by NLL and gradient: applies the stacked
@@ -123,22 +178,18 @@ fn perturbed_error_g<T: AD>(
 
 /// Between-factor NLL at stacked right perturbation `d = [δ_i; δ_j]`.
 ///
-/// `r = Log(Z⁻¹·(X_i·Exp(δ_i))⁻¹·(X_j·Exp(δ_j)))`, `s = ‖L∘r‖²`;
+/// `r = Log(Z⁻¹·(X_i·Exp(δ_i))⁻¹·(X_j·Exp(δ_j)))`, `s = ‖L·r‖²`;
 /// Gaussian `½s` for `kappa = None`, pseudo-Huber `κ²(√(1+s/κ²)−1)` else.
 pub fn between_nll_g<T: AD>(
     d: &[T; 12],
     base_i: &PoseG<T>,
     base_j: &PoseG<T>,
     z: &PoseG<T>,
-    sqrt_info_diag: &[T; 6],
+    sqrt_info: &Mat6G<T>,
     kappa: Option<f64>,
 ) -> T {
     let (r, _) = perturbed_error_g(d, base_i, base_j, z);
-    let mut s = T::constant(0.0);
-    for a in 0..6 {
-        let rw = sqrt_info_diag[a] * r[a];
-        s += rw * rw;
-    }
+    let (s, _) = whitened_square_g(sqrt_info, &r);
     match kappa {
         None => T::constant(0.5) * s,
         Some(k) => pseudo_huber(s, T::constant(k * k)),
@@ -149,7 +200,7 @@ pub fn between_nll_g<T: AD>(
 /// at any `d` — the chart parameterization factors `J_r(δ_i)`, `J_r(δ_j)`
 /// are applied inside the `T`-generic body (see the module doc).
 ///
-/// With `q = w·L²∘r` (`w` the robust weight, `1` for Gaussian):
+/// With `q = w·LᵀL·r` (`w` the robust weight, `1` for Gaussian):
 ///
 /// ```text
 /// g_i = −J_r(δ_i)ᵀ · Ad(X_rel⁻¹)ᵀ · J_r⁻¹(r)ᵀ · q
@@ -163,17 +214,13 @@ pub fn between_gradient_g<T: AD>(
     base_i: &PoseG<T>,
     base_j: &PoseG<T>,
     z: &PoseG<T>,
-    sqrt_info_diag: &[T; 6],
+    sqrt_info: &Mat6G<T>,
     kappa: Option<f64>,
 ) -> [T; 12] {
     let (r, x_rel) = perturbed_error_g(d, base_i, base_j, z);
 
     // Robust weight w = 2ρ'(s): 1 for Gaussian, 1/√(1+s/κ²) for pseudo-Huber.
-    let mut s = T::constant(0.0);
-    for a in 0..6 {
-        let rw = sqrt_info_diag[a] * r[a];
-        s += rw * rw;
-    }
+    let (s, wr) = whitened_square_g(sqrt_info, &r);
     let w = match kappa {
         None => T::constant(1.0),
         Some(k) => {
@@ -182,8 +229,8 @@ pub fn between_gradient_g<T: AD>(
         }
     };
 
-    // q = w·W·r with W = diag(L²).
-    let q: Vec6G<T> = std::array::from_fn(|a| w * sqrt_info_diag[a] * sqrt_info_diag[a] * r[a]);
+    // q = w·W·r with W = LᵀL.
+    let q: Vec6G<T> = std::array::from_fn(|a| w * wr[a]);
 
     // u = J_r⁻¹(r)ᵀ·q, then pull back through the two endpoint chains.
     let jr_inv_r = se3_jr_inv_g::<T>(&r);
@@ -223,7 +270,7 @@ pub fn between_linearize(
     base_i: &Pose,
     base_j: &Pose,
     z: &Pose,
-    sqrt_info_diag: &Vec6,
+    sqrt_info: &Mat6,
     kappa: Option<f64>,
 ) -> BetweenLin {
     let x_rel = base_i.inverse().compose(base_j);
@@ -247,11 +294,8 @@ pub fn between_linearize(
     let w = match kappa {
         None => 1.0,
         Some(k) => {
-            let mut s = 0.0;
-            for a in 0..6 {
-                let rw = sqrt_info_diag[a] * r[a];
-                s += rw * rw;
-            }
+            let rw = mv(sqrt_info, &r);
+            let s: f64 = rw.iter().map(|v| v * v).sum();
             1.0 / (1.0 + s / (k * k)).sqrt()
         }
     };
@@ -275,7 +319,7 @@ pub fn between_hessian_seeded(
     base_i: &Pose,
     base_j: &Pose,
     z: &Pose,
-    sqrt_info_diag: &Vec6,
+    sqrt_info: &Mat6,
     kappa: Option<f64>,
 ) -> [[f64; 12]; 12] {
     type T = adfn<12>;
@@ -287,7 +331,8 @@ pub fn between_hessian_seeded(
     let bi = pose_to_g::<T>(base_i);
     let bj = pose_to_g::<T>(base_j);
     let zg = pose_to_g::<T>(z);
-    let l: [T; 6] = std::array::from_fn(|a| T::constant(sqrt_info_diag[a]));
+    let l: Mat6G<T> =
+        std::array::from_fn(|a| std::array::from_fn(|b| T::constant(sqrt_info[a][b])));
     let g = between_gradient_g::<T>(&d, &bi, &bj, &zg, &l, kappa);
     std::array::from_fn(|k| g[k].tangent())
 }
@@ -295,13 +340,17 @@ pub fn between_hessian_seeded(
 // ─── Graph assembly ──────────────────────────────────────────────────────
 
 /// A pose graph at its current linearization point: node bases, prior
-/// factors, and between factors.  All matrix outputs are dense
-/// `6K × 6K` row-major `Vec<Vec<f64>>` in node-major block order.
+/// factors, between factors, and dense linearized couplings.  All matrix
+/// outputs are dense `6K × 6K` row-major `Vec<Vec<f64>>` in node-major
+/// block order.
 pub struct GraphProblem {
     /// Current base pose of each node; perturbations are `X_k·Exp(δ_k)`.
     pub poses: Vec<Pose>,
     pub priors: Vec<PriorFactor>,
     pub factors: Vec<BetweenFactor>,
+    /// Chart-local quadratic couplings (marginalization springs).  Valid
+    /// only at the current bases — rebuild after [`Self::re_base`].
+    pub linear: Vec<LinearFactor>,
 }
 
 /// Identity measurement for the prior-as-between construction.
@@ -322,67 +371,75 @@ impl GraphProblem {
         let id = identity_pose();
 
         for p in &self.priors {
-            let lin =
-                between_linearize(&self.poses[p.node], &p.x_ref, &id, &p.sqrt_info_diag, None);
-            accumulate_gradient_block(&mut g, p.node, &lin.j_i, &lin.r, &p.sqrt_info_diag, lin.w);
+            let lin = between_linearize(&self.poses[p.node], &p.x_ref, &id, &p.sqrt_info, None);
+            let q = weighted_residual(&p.sqrt_info, &lin.r, lin.w);
+            accumulate_gradient_block(&mut g, p.node, &lin.j_i, &q);
         }
         for f in &self.factors {
             let lin = between_linearize(
                 &self.poses[f.i],
                 &self.poses[f.j],
                 &f.z,
-                &f.sqrt_info_diag,
+                &f.sqrt_info,
                 f.kappa,
             );
-            accumulate_gradient_block(&mut g, f.i, &lin.j_i, &lin.r, &f.sqrt_info_diag, lin.w);
-            accumulate_gradient_block(&mut g, f.j, &lin.j_j, &lin.r, &f.sqrt_info_diag, lin.w);
+            let q = weighted_residual(&f.sqrt_info, &lin.r, lin.w);
+            accumulate_gradient_block(&mut g, f.i, &lin.j_i, &q);
+            accumulate_gradient_block(&mut g, f.j, &lin.j_j, &q);
+        }
+        for lf in &self.linear {
+            debug_assert_eq!(lf.grad.len(), 6 * lf.nodes.len());
+            for (bi, &node) in lf.nodes.iter().enumerate() {
+                for a in 0..6 {
+                    g[6 * node + a] += lf.grad[6 * bi + a];
+                }
+            }
         }
         g
     }
 
     /// Robust Gauss–Newton information at `δ = 0`: per factor
-    /// `w·JᵀWJ` blocks (Triggs weighting), scattered into `6K × 6K`.
-    /// This is the information a robust-GN solver reports — it drops the
-    /// residual-curvature terms that [`Self::exact_hessian`] keeps.
+    /// `w·JᵀWJ` blocks (Triggs weighting) plus the [`LinearFactor`] blocks,
+    /// scattered into `6K × 6K`.  This is the information a robust-GN
+    /// solver reports — it drops the residual-curvature terms that
+    /// [`Self::exact_hessian`] keeps.
     pub fn gn_information(&self) -> Vec<Vec<f64>> {
         let dim = self.dim();
         let mut info = vec![vec![0.0f64; dim]; dim];
         let id = identity_pose();
 
         for p in &self.priors {
-            let lin =
-                between_linearize(&self.poses[p.node], &p.x_ref, &id, &p.sqrt_info_diag, None);
-            accumulate_gn_block(
-                &mut info,
-                p.node,
-                p.node,
-                &lin.j_i,
-                &lin.j_i,
-                &p.sqrt_info_diag,
-                lin.w,
-            );
+            let lin = between_linearize(&self.poses[p.node], &p.x_ref, &id, &p.sqrt_info, None);
+            let lj = mm(&p.sqrt_info, &lin.j_i);
+            accumulate_gn_block(&mut info, p.node, p.node, &lj, &lj, lin.w);
         }
         for f in &self.factors {
             let lin = between_linearize(
                 &self.poses[f.i],
                 &self.poses[f.j],
                 &f.z,
-                &f.sqrt_info_diag,
+                &f.sqrt_info,
                 f.kappa,
             );
-            let l = &f.sqrt_info_diag;
-            accumulate_gn_block(&mut info, f.i, f.i, &lin.j_i, &lin.j_i, l, lin.w);
-            accumulate_gn_block(&mut info, f.j, f.j, &lin.j_j, &lin.j_j, l, lin.w);
-            accumulate_gn_block(&mut info, f.i, f.j, &lin.j_i, &lin.j_j, l, lin.w);
-            accumulate_gn_block(&mut info, f.j, f.i, &lin.j_j, &lin.j_i, l, lin.w);
+            let lji = mm(&f.sqrt_info, &lin.j_i);
+            let ljj = mm(&f.sqrt_info, &lin.j_j);
+            accumulate_gn_block(&mut info, f.i, f.i, &lji, &lji, lin.w);
+            accumulate_gn_block(&mut info, f.j, f.j, &ljj, &ljj, lin.w);
+            accumulate_gn_block(&mut info, f.i, f.j, &lji, &ljj, lin.w);
+            accumulate_gn_block(&mut info, f.j, f.i, &ljj, &lji, lin.w);
+        }
+        for lf in &self.linear {
+            scatter_linear_info(&mut info, lf);
         }
         info
     }
 
     /// Exact Hessian of the total NLL at `δ = 0`: per-factor 12×12 blocks
     /// from [`between_hessian_seeded`] (priors: the frozen-endpoint 6×6
-    /// sub-block), scattered into `6K × 6K`.  Equals the global nested-dual
-    /// Hessian to machine precision (pinned by the in-tree oracle test).
+    /// sub-block) plus the [`LinearFactor`] blocks (quadratic by
+    /// construction, so their exact Hessian *is* their information),
+    /// scattered into `6K × 6K`.  Equals the global nested-dual Hessian to
+    /// machine precision (pinned by the in-tree oracle test).
     pub fn exact_hessian(&self) -> Vec<Vec<f64>> {
         let dim = self.dim();
         let mut h = vec![vec![0.0f64; dim]; dim];
@@ -393,7 +450,7 @@ impl GraphProblem {
             // only the (node, node) 6×6 sub-block is scattered; the
             // reference's rows/columns are discarded.
             let h12 =
-                between_hessian_seeded(&self.poses[p.node], &p.x_ref, &id, &p.sqrt_info_diag, None);
+                between_hessian_seeded(&self.poses[p.node], &p.x_ref, &id, &p.sqrt_info, None);
             for a in 0..6 {
                 for b in 0..6 {
                     h[6 * p.node + a][6 * p.node + b] += h12[a][b];
@@ -405,7 +462,7 @@ impl GraphProblem {
                 &self.poses[f.i],
                 &self.poses[f.j],
                 &f.z,
-                &f.sqrt_info_diag,
+                &f.sqrt_info,
                 f.kappa,
             );
             let idx = [f.i, f.j];
@@ -419,11 +476,19 @@ impl GraphProblem {
                 }
             }
         }
+        for lf in &self.linear {
+            scatter_linear_info(&mut h, lf);
+        }
         h
     }
 
     /// Re-base the linearization point: `X_k ← X_k·Exp(step[6k..6k+6])`
     /// for every node, so the next iteration linearizes at `δ = 0`.
+    ///
+    /// [`LinearFactor`]s are **not** touched: their blocks live in the
+    /// chart at the old bases and become stale — rebuild them (exactly as
+    /// the marginalization that produced them would be redone at the new
+    /// linearization point).
     ///
     /// # Panics
     /// Panics if `step.len() != self.dim()`.
@@ -436,34 +501,60 @@ impl GraphProblem {
     }
 }
 
-/// `g[node] += w·JᵀW·r` with `W = diag(L²)`.
-fn accumulate_gradient_block(g: &mut [f64], node: usize, j: &Mat6, r: &Vec6, l: &Vec6, w: f64) {
+/// `q = w·LᵀL·r` — the weighted residual pulled back through the whitening.
+fn weighted_residual(l: &Mat6, r: &Vec6, w: f64) -> Vec6 {
+    let rw = mv(l, r);
+    std::array::from_fn(|a| {
+        let mut acc = 0.0;
+        for k in 0..6 {
+            acc += l[k][a] * rw[k];
+        }
+        w * acc
+    })
+}
+
+/// `g[node] += Jᵀ·q`.
+fn accumulate_gradient_block(g: &mut [f64], node: usize, j: &Mat6, q: &Vec6) {
     for col in 0..6 {
         let mut acc = 0.0;
         for row in 0..6 {
-            acc += j[row][col] * l[row] * l[row] * r[row];
+            acc += j[row][col] * q[row];
         }
-        g[6 * node + col] += w * acc;
+        g[6 * node + col] += acc;
     }
 }
 
-/// `info[na, nb] += w·JaᵀW·Jb` with `W = diag(L²)`.
+/// `info[na, nb] += w·(L·Ja)ᵀ(L·Jb)` given the pre-whitened `L·J` factors.
 fn accumulate_gn_block(
     info: &mut [Vec<f64>],
     na: usize,
     nb: usize,
-    ja: &Mat6,
-    jb: &Mat6,
-    l: &Vec6,
+    lja: &Mat6,
+    ljb: &Mat6,
     w: f64,
 ) {
     for a in 0..6 {
         for b in 0..6 {
             let mut acc = 0.0;
             for k in 0..6 {
-                acc += ja[k][a] * l[k] * l[k] * jb[k][b];
+                acc += lja[k][a] * ljb[k][b];
             }
             info[6 * na + a][6 * nb + b] += w * acc;
+        }
+    }
+}
+
+/// Scatter a [`LinearFactor`]'s information block into the global matrix.
+fn scatter_linear_info(m: &mut [Vec<f64>], lf: &LinearFactor) {
+    let k = lf.nodes.len();
+    debug_assert_eq!(lf.info.len(), 6 * k);
+    for (bi, &na) in lf.nodes.iter().enumerate() {
+        for (bj, &nb) in lf.nodes.iter().enumerate() {
+            for a in 0..6 {
+                for b in 0..6 {
+                    m[6 * na + a][6 * nb + b] += lf.info[6 * bi + a][6 * bj + b];
+                }
+            }
         }
     }
 }
@@ -522,11 +613,24 @@ mod tests {
         h.iter().map(|r| r.to_vec()).collect()
     }
 
+    /// Correlated whitening: diagonal `[100³, 50³]` plus deterministic
+    /// lower-triangular cross terms — exercises the full `W = LᵀL` path
+    /// (including rotation↔translation coupling) in every oracle test.
+    fn correlated_l() -> Mat6 {
+        let mut l = diagonal_sqrt_info(&[100.0, 100.0, 100.0, 50.0, 50.0, 50.0]);
+        for i in 0..6 {
+            for j in 0..i {
+                l[i][j] = 4.0 * ((i + 2 * j) % 3) as f64 - 2.0;
+            }
+        }
+        l
+    }
+
     /// One representative factor at the given rotation scale.  `rot_scale = 1`
     /// is the moderate regime; `rot_scale ~ 1e-9` puts every rotation (relative
     /// pose, residual, perturbation) in the fused-basis small-angle branch
     /// while keeping translation residuals finite.
-    fn factor_setup(rot_scale: f64) -> (Pose, Pose, Pose, Vec6) {
+    fn factor_setup(rot_scale: f64) -> (Pose, Pose, Pose, Mat6) {
         let base_i = Pose::exp(&[0.2, -0.1, 0.3, 0.5, -0.2, 0.8]);
         let step = [
             0.30 * rot_scale,
@@ -548,8 +652,7 @@ mod tests {
             0.04,
         ];
         let z = Pose::exp(&step).compose(&Pose::exp(&z_off));
-        let l: Vec6 = [100.0, 100.0, 100.0, 50.0, 50.0, 50.0];
-        (base_i, base_j, z, l)
+        (base_i, base_j, z, correlated_l())
     }
 
     /// Stacked perturbation with rotations at `rot_scale`.
@@ -574,9 +677,12 @@ mod tests {
         pose_to_g::<T>(p)
     }
 
-    fn nll_f64(d: &[f64; 12], bi: &Pose, bj: &Pose, z: &Pose, l: &Vec6, kappa: Option<f64>) -> f64 {
-        let lg: [f64; 6] = *l;
-        between_nll_g::<f64>(d, &lift_pose(bi), &lift_pose(bj), &lift_pose(z), &lg, kappa)
+    fn lift_mat6<T: AD>(m: &Mat6) -> Mat6G<T> {
+        std::array::from_fn(|a| std::array::from_fn(|b| T::constant(m[a][b])))
+    }
+
+    fn nll_f64(d: &[f64; 12], bi: &Pose, bj: &Pose, z: &Pose, l: &Mat6, kappa: Option<f64>) -> f64 {
+        between_nll_g::<f64>(d, &lift_pose(bi), &lift_pose(bj), &lift_pose(z), l, kappa)
     }
 
     fn grad_f64(
@@ -584,11 +690,10 @@ mod tests {
         bi: &Pose,
         bj: &Pose,
         z: &Pose,
-        l: &Vec6,
+        l: &Mat6,
         kappa: Option<f64>,
     ) -> [f64; 12] {
-        let lg: [f64; 6] = *l;
-        between_gradient_g::<f64>(d, &lift_pose(bi), &lift_pose(bj), &lift_pose(z), &lg, kappa)
+        between_gradient_g::<f64>(d, &lift_pose(bi), &lift_pose(bj), &lift_pose(z), l, kappa)
     }
 
     // ── (a) analytical gradient vs central FD of the NLL ────────────────
@@ -664,7 +769,7 @@ mod tests {
         bi: &Pose,
         bj: &Pose,
         z: &Pose,
-        l: &Vec6,
+        l: &Mat6,
         kappa: Option<f64>,
     ) -> Vec<Vec<f64>> {
         type T = D2<12>;
@@ -672,13 +777,12 @@ mod tests {
             let inner = Dual::<f64, 12>::seed(0.0, k);
             T::seed(inner, k)
         });
-        let lg: [T; 6] = std::array::from_fn(|a| T::constant(l[a]));
         let r = between_nll_g::<T>(
             &d,
             &lift_pose(bi),
             &lift_pose(bj),
             &lift_pose(z),
-            &lg,
+            &lift_mat6(l),
             kappa,
         );
         (0..12)
@@ -715,6 +819,8 @@ mod tests {
 
     /// Truth chain + noisy measurements + dead-reckoned bases, one spurious
     /// closure (index 1).  All rotational magnitudes scale with `rot_scale`.
+    /// Closure factors get a correlated whitening (off-diagonal `L`) so the
+    /// global oracle also certifies the non-diagonal path.
     fn build_k6(rot_scale: f64) -> GraphProblem {
         let mut rng = TestRng(7);
         let sig_anchor: Vec6 = sig6(0.01 * rot_scale, 0.02);
@@ -723,6 +829,15 @@ mod tests {
         let sig_step: Vec6 = sig6(0.05 * rot_scale, 0.10);
         let spur_sig: Vec6 = sig6(0.3 * rot_scale, 0.5);
         let mean_step: Vec6 = [0.0, 0.0, 0.35 * rot_scale, 1.0, 0.0, 0.0];
+
+        // Correlated closure whitening: diag(1/σ) + lower-triangular cross
+        // terms at ~5% of the diagonal scale.
+        let mut l_clo = diagonal_sqrt_info(&inv6(&sig_clo));
+        for i in 0..6 {
+            for j in 0..i {
+                l_clo[i][j] = 2.5 * ((i + j) % 3) as f64;
+            }
+        }
 
         let x_anc = Pose::exp(&[0.0; 6]);
         let mut truth = Vec::with_capacity(K);
@@ -745,7 +860,7 @@ mod tests {
                 i: k,
                 j: k + 1,
                 z,
-                sqrt_info_diag: inv6(&sig_odo),
+                sqrt_info: diagonal_sqrt_info(&inv6(&sig_odo)),
                 kappa: None,
             });
         }
@@ -757,7 +872,7 @@ mod tests {
                 i,
                 j,
                 z,
-                sqrt_info_diag: inv6(&sig_clo),
+                sqrt_info: l_clo,
                 kappa: Some(3.0),
             });
         }
@@ -774,9 +889,10 @@ mod tests {
             priors: vec![PriorFactor {
                 node: 0,
                 x_ref: x_anc,
-                sqrt_info_diag: inv6(&sig_anchor),
+                sqrt_info: diagonal_sqrt_info(&inv6(&sig_anchor)),
             }],
             factors,
+            linear: vec![],
         }
     }
 
@@ -808,22 +924,14 @@ mod tests {
                 .inverse()
                 .compose(&pose_to_g::<T>(&pr.x_ref))
                 .log();
-            let mut s = T::constant(0.0);
-            for a in 0..6 {
-                let rw = T::constant(pr.sqrt_info_diag[a]) * r[a];
-                s += rw * rw;
-            }
+            let (s, _) = whitened_square_g(&lift_mat6(&pr.sqrt_info), &r);
             tot += T::constant(0.5) * s;
         }
         for f in &p.factors {
             let x_rel = poses_g[f.i].inverse().compose(&poses_g[f.j]);
             let e = pose_to_g::<T>(&f.z).inverse().compose(&x_rel);
             let r = e.log();
-            let mut s = T::constant(0.0);
-            for a in 0..6 {
-                let rw = T::constant(f.sqrt_info_diag[a]) * r[a];
-                s += rw * rw;
-            }
+            let (s, _) = whitened_square_g(&lift_mat6(&f.sqrt_info), &r);
             tot += match f.kappa {
                 None => T::constant(0.5) * s,
                 Some(k) => pseudo_huber(s, T::constant(k * k)),
@@ -892,9 +1000,10 @@ mod tests {
             priors: vec![PriorFactor {
                 node: 0,
                 x_ref,
-                sqrt_info_diag: [100.0, 100.0, 100.0, 50.0, 50.0, 50.0],
+                sqrt_info: correlated_l(),
             }],
             factors: vec![],
+            linear: vec![],
         };
         let g = p.gradient();
         for v in &g {
@@ -914,6 +1023,131 @@ mod tests {
             (lin.w - 1.0).abs() < 1e-14,
             "robust weight at zero residual"
         );
+    }
+
+    // ── LinearFactor ─────────────────────────────────────────────────────
+
+    /// A Gaussian between factor, re-expressed as a `LinearFactor` from its
+    /// own linearization, must reproduce the graph gradient and GN
+    /// information exactly (same formulas, different assembly path).
+    #[test]
+    fn linear_factor_matches_linearized_between() {
+        let (bi, bj, z, l) = factor_setup(1.0);
+        let factor = BetweenFactor {
+            i: 0,
+            j: 1,
+            z,
+            sqrt_info: l,
+            kappa: None,
+        };
+
+        let p_between = GraphProblem {
+            poses: vec![bi, bj],
+            priors: vec![],
+            factors: vec![factor],
+            linear: vec![],
+        };
+
+        // Build the equivalent dense blocks from the linearization.
+        let lin = between_linearize(&bi, &bj, &z, &l, None);
+        let q = weighted_residual(&l, &lin.r, 1.0);
+        let mut grad = vec![0.0f64; 12];
+        accumulate_gradient_block(&mut grad[..], 0, &lin.j_i, &q);
+        accumulate_gradient_block(&mut grad[..], 1, &lin.j_j, &q);
+        let lji = mm(&l, &lin.j_i);
+        let ljj = mm(&l, &lin.j_j);
+        let mut info = vec![vec![0.0f64; 12]; 12];
+        accumulate_gn_block(&mut info, 0, 0, &lji, &lji, 1.0);
+        accumulate_gn_block(&mut info, 1, 1, &ljj, &ljj, 1.0);
+        accumulate_gn_block(&mut info, 0, 1, &lji, &ljj, 1.0);
+        accumulate_gn_block(&mut info, 1, 0, &ljj, &lji, 1.0);
+
+        let p_linear = GraphProblem {
+            poses: vec![bi, bj],
+            priors: vec![],
+            factors: vec![],
+            linear: vec![LinearFactor {
+                nodes: vec![0, 1],
+                grad,
+                info,
+            }],
+        };
+
+        let g_a = p_between.gradient();
+        let g_b = p_linear.gradient();
+        assert!(
+            rel_err_vec(&g_b, &g_a, 1.0) < 1e-14,
+            "gradient: linear-factor path diverges from between path"
+        );
+        let i_a = p_between.gn_information();
+        let i_b = p_linear.gn_information();
+        assert!(
+            rel_err_mat(&i_b, &i_a) < 1e-14,
+            "gn_information: linear-factor path diverges from between path"
+        );
+
+        // A LinearFactor is exactly quadratic: its exact Hessian IS its
+        // information (unlike the between factor, whose exact Hessian
+        // carries curvature terms on top).
+        let h_b = p_linear.exact_hessian();
+        assert!(rel_err_mat(&h_b, &i_b) < 1e-15);
+    }
+
+    /// Multi-node scatter guard: two overlapping factors (3-node and
+    /// 2-node, sharing node 2, on a K = 4 graph) must sum into the global
+    /// matrix exactly like a hand-scattered dense construction.
+    #[test]
+    fn linear_factor_multinode_scatter() {
+        let mut rng = TestRng(99);
+        let make = |rng: &mut TestRng, nodes: Vec<usize>| {
+            let d = 6 * nodes.len();
+            let grad: Vec<f64> = (0..d).map(|_| rng.normal()).collect();
+            // Symmetric info block.
+            let mut info = vec![vec![0.0f64; d]; d];
+            for a in 0..d {
+                for b in 0..=a {
+                    let v = rng.normal();
+                    info[a][b] = v;
+                    info[b][a] = v;
+                }
+            }
+            LinearFactor { nodes, grad, info }
+        };
+        let lf_a = make(&mut rng, vec![0, 2, 3]);
+        let lf_b = make(&mut rng, vec![2, 1]);
+
+        let poses: Vec<Pose> = (0..4)
+            .map(|k| Pose::exp(&[0.1 * k as f64, 0.0, -0.05, 1.0, 0.0, 0.5]))
+            .collect();
+        let p = GraphProblem {
+            poses,
+            priors: vec![],
+            factors: vec![],
+            linear: vec![lf_a.clone(), lf_b.clone()],
+        };
+
+        // Hand-scattered reference.
+        let dim = 24;
+        let mut g_ref = vec![0.0f64; dim];
+        let mut m_ref = vec![vec![0.0f64; dim]; dim];
+        for lf in [&lf_a, &lf_b] {
+            for (bi, &na) in lf.nodes.iter().enumerate() {
+                for a in 0..6 {
+                    g_ref[6 * na + a] += lf.grad[6 * bi + a];
+                }
+                for (bj, &nb) in lf.nodes.iter().enumerate() {
+                    for a in 0..6 {
+                        for b in 0..6 {
+                            m_ref[6 * na + a][6 * nb + b] += lf.info[6 * bi + a][6 * bj + b];
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(rel_err_vec(&p.gradient(), &g_ref, 1.0) < 1e-15);
+        assert!(rel_err_mat(&p.gn_information(), &m_ref) < 1e-15);
+        assert!(rel_err_mat(&p.exact_hessian(), &m_ref) < 1e-15);
     }
 
     // ── (f) small-angle regime: a–d at ‖relative rotation‖ ~ 1e-9 ───────

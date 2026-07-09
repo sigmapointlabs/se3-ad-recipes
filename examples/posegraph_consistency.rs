@@ -29,7 +29,7 @@
 #![allow(clippy::doc_overindented_list_items)]
 
 use se3_ad_recipes::Vec6;
-use se3_ad_recipes::graph::{BetweenFactor, GraphProblem, PriorFactor};
+use se3_ad_recipes::graph::{BetweenFactor, GraphProblem, PriorFactor, diagonal_sqrt_info};
 use se3_ad_recipes::linalg::{Chol, cholesky_n};
 use se3_ad_recipes::se3_unsafe::Pose;
 
@@ -125,7 +125,7 @@ fn sample_trial(rng: &mut Rng, gamma: f64) -> (Vec<Pose>, GraphProblem) {
             i: k,
             j: k + 1,
             z,
-            sqrt_info_diag: inv6(&SIG_ODO),
+            sqrt_info: diagonal_sqrt_info(&inv6(&SIG_ODO)),
             kappa: None,
         });
     }
@@ -141,7 +141,7 @@ fn sample_trial(rng: &mut Rng, gamma: f64) -> (Vec<Pose>, GraphProblem) {
             i,
             j,
             z,
-            sqrt_info_diag: inv6(&SIG_CLO),
+            sqrt_info: diagonal_sqrt_info(&inv6(&SIG_CLO)),
             kappa: Some(KAPPA),
         });
     }
@@ -158,9 +158,10 @@ fn sample_trial(rng: &mut Rng, gamma: f64) -> (Vec<Pose>, GraphProblem) {
         priors: vec![PriorFactor {
             node: 0,
             x_ref: x_anc,
-            sqrt_info_diag: inv6(&SIG_ANCHOR),
+            sqrt_info: diagonal_sqrt_info(&inv6(&SIG_ANCHOR)),
         }],
         factors,
+        linear: vec![],
     };
     (truth, problem)
 }

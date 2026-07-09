@@ -75,6 +75,12 @@ pub mod so3_unsafe;
 
 #[cfg(any(test, feature = "bench-support"))]
 #[doc(hidden)]
+pub mod graph;
+#[cfg(any(test, feature = "bench-support"))]
+#[doc(hidden)]
+pub mod linalg;
+#[cfg(any(test, feature = "bench-support"))]
+#[doc(hidden)]
 pub mod nll_bench;
 
 #[cfg(test)]

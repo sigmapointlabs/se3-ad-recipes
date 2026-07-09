@@ -12,3 +12,6 @@
 # Local AI agent guidance (per-developer, not for remote)
 /CLAUDE.md
 /docs/superpowers/
+# Private-side JAX reference transcripts (kept locally next to the Rust
+# examples they validate; they exec() scripts that live outside this repo)
+/examples/*.py

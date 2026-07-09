@@ -31,3 +31,11 @@ serde_json = "1.0"
 name = "nll_hessian"
 harness = false
 required-features = ["bench-support"]
+
+[[example]]
+name = "nees_consistency"
+required-features = ["bench-support"]
+
+[[example]]
+name = "posegraph_consistency"
+required-features = ["bench-support"]

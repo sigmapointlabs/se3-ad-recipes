@@ -55,6 +55,8 @@ pub mod act;
 #[doc(hidden)]
 pub mod autodiff;
 #[doc(hidden)]
+pub mod isserlis;
+#[doc(hidden)]
 pub mod jacobians_ad;
 #[doc(hidden)]
 pub mod jacobians_se23_adsafe;

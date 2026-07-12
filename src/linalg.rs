@@ -34,7 +34,10 @@ pub fn cholesky_n(a: &[Vec<f64>]) -> Option<Chol> {
             }
             if i == j {
                 let d = a[i][i] - sum;
-                if d <= 0.0 {
+                // Non-finite pivots must be rejected too (`NaN <= 0.0` is
+                // false), or a NaN/inf pivot would sqrt into a silently
+                // poisoned factor.
+                if d <= 0.0 || !d.is_finite() {
                     return None;
                 }
                 l[i][i] = d.sqrt();

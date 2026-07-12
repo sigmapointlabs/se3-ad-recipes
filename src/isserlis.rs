@@ -1,6 +1,10 @@
 //! Gaussian moment contractions (Isserlis / Wick) for tensor-based
 //! uncertainty transport.
 //!
+//! Raw-tier module: no SemVer stability promise (see [`crate::api`] for
+//! the curated tiers); a candidate for `api::expert` promotion once the
+//! covariance-transport application stabilizes its conventions.
+//!
 //! For a smooth map φ: ℝᴺ → ℝᴺ expanded at the origin as
 //! `φ(ξ) ≈ φ(0) + J·ξ + ½ H:ξξ + ⅙ C:ξξξ` with `ξ ~ N(0, Σ)`, these
 //! contractions give the transported moments complete through O(σ⁴):

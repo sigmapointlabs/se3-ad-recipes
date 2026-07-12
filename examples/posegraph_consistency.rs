@@ -3,7 +3,8 @@
 //! factor Hessians, `graph::exact_hessian`) on a K = 6 SE(3) pose graph with
 //! loop closures and spurious-closure contamination.
 //!
-//! Monte-Carlo protocol (mirrors `posegraph_reference.py`, the JAX prototype):
+//! Monte-Carlo protocol (mirrors `posegraph_reference.py`, the JAX
+//! prototype; kept out of the public tree — see `.gitignore`):
 //!   1. Sample a truth chain X_{k+1} = X_k · Exp(u + w), u the nominal step,
 //!      w ~ N(0, Σ_step); X_0 = X_anc · Exp(ξ), ξ ~ N(0, Σ_anchor).
 //!   2. Generate Gaussian odometry measurements along the chain and robust
@@ -51,8 +52,13 @@ const GAMMA_SWEEP: [f64; 3] = [0.0, 0.25, 0.5];
 /// across seeds, and the between-seed standard deviation quantifies the
 /// Monte-Carlo uncertainty of the reported number.
 const SEEDS: [u64; 3] = [1, 2, 3];
-/// CSV output path, relative to the crate root (where `cargo run` sets cwd).
-const CSV_PATH: &str = "../experiments/data/posegraph.csv";
+/// CSV output path, anchored to the crate root at compile time — `cargo
+/// run` inherits the invoker's cwd, so a raw relative path would scatter
+/// output wherever the example happened to be launched from.
+const CSV_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../experiments/data/posegraph.csv"
+);
 
 // ─── Minimal deterministic RNG (SplitMix64 + Box–Muller), zero deps ─────
 

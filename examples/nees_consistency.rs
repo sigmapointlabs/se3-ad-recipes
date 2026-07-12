@@ -1,15 +1,16 @@
 //! NEES covariance-consistency study: Gauss–Newton/FIM information vs the
-//! exact observed information (seeded-AD Hessian, `hessian_d2`) on a robust
-//! SE(3) pose-with-prior problem.
+//! exact observed information (nested-dual Hessian, `hessian_d2`) on a
+//! robust SE(3) pose-with-prior problem.
 //!
-//! Monte-Carlo protocol (mirrors `nees_reference.py`, the JAX prototype):
+//! Monte-Carlo protocol (mirrors `nees_consistency.py`, the JAX prototype;
+//! kept out of the public tree — see `.gitignore`):
 //!   1. Sample T_true = T_prior · Exp(ξ),  ξ ~ N(0, Σ_prior).
 //!   2. Generate landmark observations with Gaussian inlier noise σ_z and a
 //!      fraction ε of gross uniform outliers.
 //!   3. Solve the MAP problem by damped robust-GN with re-basing, so the
 //!      converged linearization point has δ = 0 (the Algorithm-1 setting).
 //!   4. Evaluate two information matrices at the MAP:
-//!        I_GN = Σ_i ρ'(s_i)·J_iᵀJ_i + J_pᵀ Σ_p⁻¹ J_p     (what solvers report)
+//!        I_GN = Σ_i 2ρ'(s_i)·J_iᵀJ_i + J_pᵀ Σ_p⁻¹ J_p    (what solvers report)
 //!        H    = exact NLL Hessian via nested duals (`hessian_d2`)
 //!   5. NEES = ξ_errᵀ · I · ξ_err with ξ_err = Log(T̂⁻¹ T_true); average over
 //!      trials → ANEES, compared against the χ²₆ 95% consistency band.
@@ -42,8 +43,10 @@ const EPS_SWEEP: [f64; 4] = [0.0, 0.1, 0.2, 0.3];
 /// across seeds, and the between-seed standard deviation quantifies the
 /// Monte-Carlo uncertainty of the reported number.
 const SEEDS: [u64; 3] = [1, 2, 3];
-/// CSV output path, relative to the crate root (where `cargo run` sets cwd).
-const CSV_PATH: &str = "../experiments/data/nees.csv";
+/// CSV output path, anchored to the crate root at compile time — `cargo
+/// run` inherits the invoker's cwd, so a raw relative path would scatter
+/// output wherever the example happened to be launched from.
+const CSV_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../experiments/data/nees.csv");
 
 // ─── Minimal deterministic RNG (SplitMix64 + Box–Muller), zero deps ─────
 
@@ -100,7 +103,9 @@ fn chol6(a: &Mat6) -> Option<Mat6> {
             }
             if i == j {
                 let d = a[i][i] - sum;
-                if d <= 0.0 {
+                // Non-finite pivots rejected too (`NaN <= 0.0` is false),
+                // matching linalg::cholesky_n.
+                if d <= 0.0 || !d.is_finite() {
                     return None;
                 }
                 l[i][i] = d.sqrt();
@@ -182,7 +187,7 @@ fn sample_trial(rng: &mut Rng, lms: &[[f64; 3]], eps: f64, kappa: f64) -> (Pose,
 
 // ─── Robust Gauss–Newton information (the covariance solvers report) ────
 
-/// I_GN = Σ_i ρ'(s_i)·2·J_iᵀ J_i /2-convention + J_pᵀ Σ_p⁻¹ J_p, assembled at
+/// I_GN = Σ_i 2ρ'(s_i)·J_iᵀJ_i + J_pᵀ Σ_p⁻¹ J_p, assembled at
 /// the current `p.base` with δ = 0.
 ///
 /// Convention check: the crate's pseudo-Huber ρ(s) = κ²(√(1+s/κ²) − 1) has

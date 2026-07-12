@@ -27,9 +27,12 @@
 //!   `X_ref = X·Exp(r)`, `r = Log(X⁻¹·X_ref)` (a between factor with
 //!   `Z = I` and the reference as the fixed second node).
 //! - **Whitening is a square root of the information.** Each factor
-//!   carries `sqrt_info = L`, any matrix square root of the measurement
-//!   information `W = LᵀL` — a lower-triangular Cholesky factor for
-//!   correlated noise, or `diag(1/σ)` for the diagonal case (see
+//!   carries `sqrt_info = L`, any matrix satisfying `W = LᵀL` for the
+//!   measurement information `W`.  Mind the orientation for correlated
+//!   noise: the conventional **lower** Cholesky factor `C` of `W`
+//!   satisfies `C·Cᵀ = W`, so pass its transpose, `L = Cᵀ` (an upper
+//!   factor) — passing `C` itself silently weights by `CᵀC ≠ W`.  For
+//!   independent per-axis noise use `diag(1/σ)` (orientation-free; see
 //!   [`diagonal_sqrt_info`]).  The whitened residual is `r_w = L·r`,
 //!   `s = ‖L·r‖²`.  Gaussian factors cost `½s`; robust factors the
 //!   pseudo-Huber kernel `κ²(√(1+s/κ²) − 1)` (see
@@ -353,11 +356,6 @@ pub struct GraphProblem {
     pub linear: Vec<LinearFactor>,
 }
 
-/// Identity measurement for the prior-as-between construction.
-fn identity_pose() -> Pose {
-    Pose::exp(&[0.0; 6])
-}
-
 impl GraphProblem {
     /// Total tangent dimension `6K`.
     pub fn dim(&self) -> usize {
@@ -368,7 +366,7 @@ impl GraphProblem {
     pub fn gradient(&self) -> Vec<f64> {
         let dim = self.dim();
         let mut g = vec![0.0f64; dim];
-        let id = identity_pose();
+        let id = Pose::identity();
 
         for p in &self.priors {
             let lin = between_linearize(&self.poses[p.node], &p.x_ref, &id, &p.sqrt_info, None);
@@ -399,14 +397,15 @@ impl GraphProblem {
     }
 
     /// Robust Gauss–Newton information at `δ = 0`: per factor
-    /// `w·JᵀWJ` blocks (Triggs weighting) plus the [`LinearFactor`] blocks,
+    /// `w·JᵀWJ` blocks (IRLS weighting — the ρ″ rank-1 "Triggs correction"
+    /// is deliberately dropped) plus the [`LinearFactor`] blocks,
     /// scattered into `6K × 6K`.  This is the information a robust-GN
     /// solver reports — it drops the residual-curvature terms that
     /// [`Self::exact_hessian`] keeps.
     pub fn gn_information(&self) -> Vec<Vec<f64>> {
         let dim = self.dim();
         let mut info = vec![vec![0.0f64; dim]; dim];
-        let id = identity_pose();
+        let id = Pose::identity();
 
         for p in &self.priors {
             let lin = between_linearize(&self.poses[p.node], &p.x_ref, &id, &p.sqrt_info, None);
@@ -443,7 +442,7 @@ impl GraphProblem {
     pub fn exact_hessian(&self) -> Vec<Vec<f64>> {
         let dim = self.dim();
         let mut h = vec![vec![0.0f64; dim]; dim];
-        let id = identity_pose();
+        let id = Pose::identity();
 
         for p in &self.priors {
             // Prior = between factor against the frozen reference endpoint:
@@ -588,8 +587,14 @@ mod tests {
 
     // ── Helpers ──────────────────────────────────────────────────────────
 
-    /// max |a - b| / max(|b|_maxabs, floor).
+    /// max |a - b| / max(|b|_maxabs, floor).  Asserts both operands are
+    /// finite — `f64::max` silently drops NaN, so without the check a
+    /// NaN-poisoned oracle would vanish from both diff and scale and the
+    /// comparison would pass.
     fn rel_err_vec(a: &[f64], b: &[f64], floor: f64) -> f64 {
+        for (x, y) in a.iter().zip(b) {
+            assert!(x.is_finite() && y.is_finite(), "non-finite operand");
+        }
         let scale = b.iter().fold(floor, |m, x| m.max(x.abs()));
         a.iter()
             .zip(b)
@@ -597,11 +602,13 @@ mod tests {
             / scale
     }
 
+    /// Same finiteness contract as [`rel_err_vec`].
     fn rel_err_mat(a: &[Vec<f64>], b: &[Vec<f64>]) -> f64 {
         let mut diff = 0.0f64;
         let mut scale = 0.0f64;
         for (ra, rb) in a.iter().zip(b) {
             for (x, y) in ra.iter().zip(rb) {
+                assert!(x.is_finite() && y.is_finite(), "non-finite operand");
                 diff = diff.max((x - y).abs());
                 scale = scale.max(y.abs());
             }
@@ -839,7 +846,7 @@ mod tests {
             }
         }
 
-        let x_anc = Pose::exp(&[0.0; 6]);
+        let x_anc = Pose::identity();
         let mut truth = Vec::with_capacity(K);
         truth.push(x_anc.compose(&Pose::exp(&draw(&mut rng, &sig_anchor))));
         for k in 0..K - 1 {

@@ -29,7 +29,9 @@
 //!    suffix, no dimension suffixes — and is intended to outlive the
 //!    paper's evolving notation.
 //! 3. **Raw modules.** `so3_adsafe`, `se3_adsafe`, `se23_adsafe`,
-//!    `se3_quat_adsafe`, `jacobians_*`, `projective`, `autodiff`. Hidden
+//!    `se3_quat_adsafe`, `jacobians_*`, `projective`, `autodiff`,
+//!    `isserlis`, plus the `bench-support`-gated `nll_bench`, `graph`,
+//!    and `linalg` (the latter distinct from [`expert::linalg`]). Hidden
 //!    from rustdoc, `pub` for source compatibility. **No stability
 //!    promise** — these track paper notation and may rename / move /
 //!    disappear between minor releases. Use only as an escape hatch for

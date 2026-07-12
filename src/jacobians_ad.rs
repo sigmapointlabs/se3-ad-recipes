@@ -288,6 +288,12 @@ pub fn se3_jr_inv_directional_derivative_g<T: AD>(xi: &Vec6G<T>, direction: &Vec
 /// 6×6×6 tensor over AD scalar T.
 pub type Tensor666G<T> = [[[T; 6]; 6]; 6];
 
+/// 6×6×6×6 tensor over AD scalar T (index order `[out][in][in][in]`,
+/// symmetric in the trailing three).  Produced by one `adfn<6>`-seeded
+/// evaluation of [`recentering_hessian_at_g`] (the mixed-AD cubic recipe);
+/// consumed by [`crate::isserlis::linear_cubic_covariance_correction_g`].
+pub type Tensor6666G<T> = [[[[T; 6]; 6]; 6]; 6];
+
 /// AD-generic Hessian at general c (not just c = 0).
 ///
 /// Uses `se3_jr_derivative_g` at c — the key function that was missing

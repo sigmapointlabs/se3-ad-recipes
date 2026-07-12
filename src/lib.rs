@@ -28,8 +28,12 @@
 //! [`api`] module's rustdoc for the contract on each tier.
 //!
 //! The raw modules (`so3_*`, `se3_*`, `se23_adsafe`, `se3_quat_adsafe`,
-//! `projective`, `jacobians_*`, `autodiff`, ...) remain `pub` for source
-//! compatibility and reproducibility but are hidden from rustdoc.
+//! `projective`, `jacobians_*`, `autodiff`, `isserlis`, ...) remain `pub`
+//! for source compatibility and reproducibility but are hidden from
+//! rustdoc and carry no SemVer stability promise.  The test/bench-support
+//! modules (`nll_bench`, `graph`, `linalg`) additionally require the
+//! `bench-support` feature; note the gated `linalg` is distinct from the
+//! curated [`api::expert::linalg`].
 //!
 //! ## Dimension-generic operations
 //!
@@ -55,6 +59,8 @@ pub mod act;
 #[doc(hidden)]
 pub mod autodiff;
 #[doc(hidden)]
+pub mod isserlis;
+#[doc(hidden)]
 pub mod jacobians_ad;
 #[doc(hidden)]
 pub mod jacobians_se23_adsafe;
@@ -73,6 +79,12 @@ pub mod so3_adsafe;
 #[doc(hidden)]
 pub mod so3_unsafe;
 
+#[cfg(any(test, feature = "bench-support"))]
+#[doc(hidden)]
+pub mod graph;
+#[cfg(any(test, feature = "bench-support"))]
+#[doc(hidden)]
+pub mod linalg;
 #[cfg(any(test, feature = "bench-support"))]
 #[doc(hidden)]
 pub mod nll_bench;

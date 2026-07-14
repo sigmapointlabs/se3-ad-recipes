@@ -285,6 +285,10 @@ fn run_sweep(eps: f64, lms: &[[f64; 3]], seed: u64, kappa: f64) -> SweepRow {
         sum_h += se3_ad_recipes::dot(&xi_err, &mv(&h_exact, &xi_err));
         n += 1;
     }
+    assert!(
+        n > 0,
+        "all {M_TRIALS} trials skipped at eps={eps} — cannot form an ANEES mean"
+    );
     SweepRow {
         n,
         skipped,
@@ -342,10 +346,11 @@ fn main() {
         let mut h_vals = Vec::with_capacity(SEEDS.len());
         let mut n_total = 0usize;
         let mut skipped_total = 0usize;
-        for (j, &seed) in SEEDS.iter().enumerate() {
-            // Seed streams: distinct per (epsilon, seed) pair so no two
-            // sweep points share a Monte-Carlo trajectory.
-            let stream = 1 + (k as u64) * 100 + seed + (j as u64);
+        for &seed in SEEDS.iter() {
+            // Seed streams: unique per (epsilon-index k, seed) with a k-stride
+            // (1000) far larger than any seed, so the streams stay distinct
+            // regardless of how SEEDS is ordered — no silent collision.
+            let stream = 1 + (k as u64) * 1000 + seed;
             let row = run_sweep(eps, &lms, stream, KAPPA);
             gn_vals.push(row.anees_gn);
             h_vals.push(row.anees_h);
@@ -395,8 +400,8 @@ fn main() {
     let kappa_control = 1.0e9;
     let mut gn_vals = Vec::with_capacity(SEEDS.len());
     let mut h_vals = Vec::with_capacity(SEEDS.len());
-    for (j, &seed) in SEEDS.iter().enumerate() {
-        let stream = 90_000 + seed + (j as u64);
+    for &seed in SEEDS.iter() {
+        let stream = 90_000 + seed;
         let row = run_sweep(0.0, &lms, stream, kappa_control);
         gn_vals.push(row.anees_gn);
         h_vals.push(row.anees_h);

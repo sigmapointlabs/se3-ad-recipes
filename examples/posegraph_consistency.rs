@@ -247,6 +247,10 @@ fn run_sweep(gamma: f64, seed: u64) -> SweepRow {
         s_lh += lh;
         n += 1;
     }
+    assert!(
+        n > 0,
+        "all {M_TRIALS} trials skipped at gamma={gamma} — cannot form an ANEES mean"
+    );
     SweepRow {
         n,
         skipped,
@@ -313,10 +317,11 @@ fn main() {
         let mut lh = Vec::with_capacity(SEEDS.len());
         let mut n_total = 0usize;
         let mut skipped_total = 0usize;
-        for (j, &seed) in SEEDS.iter().enumerate() {
-            // Seed streams: distinct per (gamma, seed) pair so no two
-            // sweep points share a Monte-Carlo trajectory.
-            let stream = 1 + (k as u64) * 100 + seed + (j as u64);
+        for &seed in SEEDS.iter() {
+            // Seed streams: unique per (gamma-index k, seed) with a k-stride
+            // (1000) far larger than any seed, so the streams stay distinct
+            // regardless of how SEEDS is ordered — no silent collision.
+            let stream = 1 + (k as u64) * 1000 + seed;
             let row = run_sweep(gamma, stream);
             fg.push(row.full_gn);
             fh.push(row.full_h);

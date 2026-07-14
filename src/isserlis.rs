@@ -28,21 +28,8 @@
 //! `H[i][p][q]` (the mixed-AD recipe; see the in-tree transport test for
 //! the five-line construction).
 
+use crate::api::expert::linalg::matmul;
 use crate::autodiff::ad_trait::AD;
-
-/// a·b for N×N `T`-valued matrices (local helper; keeps the module
-/// free-standing).
-fn matmul_g<T: AD, const N: usize>(a: &[[T; N]; N], b: &[[T; N]; N]) -> [[T; N]; N] {
-    std::array::from_fn(|i| {
-        std::array::from_fn(|j| {
-            let mut s = T::constant(0.0);
-            for k in 0..N {
-                s += a[i][k] * b[k][j];
-            }
-            s
-        })
-    })
-}
 
 /// Second-order mean shift of a zero-mean Gaussian pushed through a chart
 /// map with Hessian tensor `h` (index order `[out][in][in]`, e.g. from
@@ -90,7 +77,7 @@ pub fn isserlis_covariance_correction_g<T: AD, const N: usize>(
     let z = T::constant(0.0);
     let half = T::constant(0.5);
     // P_i = H_i·Σ;  Δ_ij = ½ tr(P_i·P_j) = ½ Σ_ab P_i[a][b]·P_j[b][a].
-    let p: [[[T; N]; N]; N] = std::array::from_fn(|i| matmul_g(&h[i], sigma));
+    let p: [[[T; N]; N]; N] = std::array::from_fn(|i| matmul(&h[i], sigma));
     let mut delta = [[z; N]; N];
     for i in 0..N {
         for j in 0..=i {
@@ -147,7 +134,7 @@ pub fn linear_cubic_covariance_correction_g<T: AD, const N: usize>(
     }
 
     // A = J·Σ·Mᵀ;  Δ_LC = ½ (A + Aᵀ).
-    let js = matmul_g(jac, sigma);
+    let js = matmul(jac, sigma);
     let mut delta = [[z; N]; N];
     for i in 0..N {
         for j in 0..N {

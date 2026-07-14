@@ -260,6 +260,129 @@ mod tests {
         );
     }
 
+    /// N = 9 smoke test.  The three contractions are `<const N>` but every
+    /// other test pins N = 6; exercise the SE₂(3)-sized path on a synthetic
+    /// symmetric 9×9×9 tensor so an SE(3)-only regression can't slip through
+    /// silently.  Mean shift and QQ covariance are MC-validated on the
+    /// quadratic map y = ½ H:ξξ; the linear×cubic term is checked for a
+    /// finite, symmetric result.
+    #[test]
+    fn isserlis_contractions_run_at_n9() {
+        const N: usize = 9;
+        // Synthetic Hessian, symmetric in the trailing two indices (the
+        // symmetry the Isserlis derivation assumes).
+        let mut h = [[[0.0f64; N]; N]; N];
+        for i in 0..N {
+            for p in 0..N {
+                for q in 0..=p {
+                    let v = 0.1 * (((i + 2 * p + 3 * q) % 5) as f64 - 2.0);
+                    h[i][p][q] = v;
+                    h[i][q][p] = v;
+                }
+            }
+        }
+        // Lower-triangular factor L → Σ = L·Lᵀ (mild correlations, SPD).
+        let mut l = [[0.0f64; N]; N];
+        for i in 0..N {
+            l[i][i] = 0.15 + 0.01 * i as f64;
+            for j in 0..i {
+                l[i][j] = 0.02 * ((i + j) % 3) as f64;
+            }
+        }
+        let mut sigma = [[0.0f64; N]; N];
+        for i in 0..N {
+            for j in 0..N {
+                for k in 0..N {
+                    sigma[i][j] += l[i][k] * l[j][k];
+                }
+            }
+        }
+
+        let mu = second_order_mean_shift_g::<f64, N>(&h, &sigma);
+        let delta = isserlis_covariance_correction_g::<f64, N>(&h, &sigma);
+
+        // Monte-Carlo ground truth on the quadratic map y = ½ H:ξξ.
+        let n = 200_000usize;
+        let mut rng = Rng::new(9);
+        let mut mean = [0.0f64; N];
+        let mut samples: Vec<[f64; N]> = Vec::with_capacity(n);
+        for _ in 0..n {
+            let raw: [f64; N] = std::array::from_fn(|_| rng.normal());
+            let xi: [f64; N] = std::array::from_fn(|i| (0..=i).map(|k| l[i][k] * raw[k]).sum());
+            let y: [f64; N] = std::array::from_fn(|i| {
+                let mut acc = 0.0;
+                for p in 0..N {
+                    for q in 0..N {
+                        acc += h[i][p][q] * xi[p] * xi[q];
+                    }
+                }
+                0.5 * acc
+            });
+            for i in 0..N {
+                mean[i] += y[i];
+            }
+            samples.push(y);
+        }
+        for m in mean.iter_mut() {
+            *m /= n as f64;
+        }
+        let mut cov = [[0.0f64; N]; N];
+        for y in &samples {
+            for i in 0..N {
+                for j in 0..N {
+                    cov[i][j] += (y[i] - mean[i]) * (y[j] - mean[j]);
+                }
+            }
+        }
+        for row in cov.iter_mut() {
+            for v in row.iter_mut() {
+                *v /= (n - 1) as f64;
+            }
+        }
+
+        let mean_scale = mu.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        for i in 0..N {
+            assert!(
+                (mean[i] - mu[i]).abs() < 0.02 * mean_scale,
+                "N=9 mean[{i}]: MC {:.5e} vs ½H:Σ {:.5e}",
+                mean[i],
+                mu[i]
+            );
+        }
+        let rel = frob_diff(&cov, &delta) / frob(&delta);
+        assert!(
+            rel < 0.05,
+            "N=9 quadratic-map covariance: MC vs Isserlis rel = {rel:.3e}"
+        );
+
+        // Exercise the linear×cubic contraction at N = 9: it must run and
+        // return a finite, symmetric matrix (Δ_LC = ½(A + Aᵀ)).
+        let mut jac = [[0.0f64; N]; N];
+        for i in 0..N {
+            jac[i][i] = 1.0 + 0.05 * i as f64;
+        }
+        let mut cubic = [[[[0.0f64; N]; N]; N]; N];
+        for i in 0..N {
+            for p in 0..N {
+                for q in 0..N {
+                    for r in 0..N {
+                        cubic[i][p][q][r] = 0.01 * (((i + p + q + r) % 3) as f64 - 1.0);
+                    }
+                }
+            }
+        }
+        let lc = linear_cubic_covariance_correction_g::<f64, N>(&jac, &cubic, &sigma);
+        for i in 0..N {
+            for j in 0..N {
+                assert!(lc[i][j].is_finite(), "N=9 Δ_LC[{i}][{j}] not finite");
+                assert!(
+                    (lc[i][j] - lc[j][i]).abs() < 1e-12,
+                    "N=9 Δ_LC not symmetric at [{i}][{j}]"
+                );
+            }
+        }
+    }
+
     /// Cubic tensor of F(c) = Log(Exp(ξ̄)·Exp(c)) − ξ̄ at c = 0 via the
     /// mixed-AD recipe: one `adfn<6>`-seeded evaluation of the general-chart
     /// Hessian; `C[i][p][q][r]` is the tangent of `H[i][p][q]`.

@@ -88,6 +88,9 @@ pub mod linalg;
 #[cfg(any(test, feature = "bench-support"))]
 #[doc(hidden)]
 pub mod nll_bench;
+#[cfg(any(test, feature = "bench-support"))]
+#[doc(hidden)]
+pub mod test_support;
 
 #[cfg(test)]
 mod nll_tests;

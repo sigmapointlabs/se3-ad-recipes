@@ -172,25 +172,7 @@ mod tests {
     use super::*;
     use crate::jacobians_ad::{Tensor6666G, recentering_hessian_at_g, recentering_hessian_g};
     use crate::se3_adsafe::{Mat6G, PoseG, Vec6G, mv6_g, se3_jr_inv_g};
-
-    /// SplitMix64 + two-uniform Box–Muller, deterministic.
-    struct TestRng(u64);
-    impl TestRng {
-        fn next_u64(&mut self) -> u64 {
-            self.0 = self.0.wrapping_add(0x9E3779B97F4A7C15);
-            let mut z = self.0;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
-            z ^ (z >> 31)
-        }
-        fn uniform(&mut self) -> f64 {
-            (self.next_u64() >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
-        }
-        fn normal(&mut self) -> f64 {
-            let (u1, u2) = (self.uniform().max(1e-300), self.uniform());
-            (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
-        }
-    }
+    use crate::test_support::Rng;
 
     const XI_BAR: Vec6G<f64> = [0.3, -0.2, 0.4, 0.5, -0.3, 0.7];
 
@@ -220,7 +202,7 @@ mod tests {
         s
     }
 
-    fn draw_xi(rng: &mut TestRng, l: &[[f64; 6]; 6]) -> Vec6G<f64> {
+    fn draw_xi(rng: &mut Rng, l: &[[f64; 6]; 6]) -> Vec6G<f64> {
         let n: [f64; 6] = std::array::from_fn(|_| rng.normal());
         std::array::from_fn(|i| (0..=i).map(|k| l[i][k] * n[k]).sum())
     }
@@ -252,7 +234,7 @@ mod tests {
         let delta = isserlis_covariance_correction_g(&h, &sigma);
 
         let n = 200_000usize;
-        let mut rng = TestRng(42);
+        let mut rng = Rng::new(42);
         let mut mean = [0.0f64; 6];
         let mut cov = [[0.0f64; 6]; 6];
         let mut samples = Vec::with_capacity(n);

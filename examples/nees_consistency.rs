@@ -27,6 +27,7 @@ use se3_ad_recipes::nll_bench::{FixedBasis, Problem, hessian_d2, nll_gradient};
 use se3_ad_recipes::projective::{j_cross, project, project_jacobian, transform_point};
 use se3_ad_recipes::se3_adsafe::{adjoint_g, se3_jr_inv_g};
 use se3_ad_recipes::se3_unsafe::{Pose, right_update};
+use se3_ad_recipes::test_support::{Rng, mean_std};
 use se3_ad_recipes::{Mat6, Vec6, mm, mv, norm, transpose};
 
 // ─── Experiment constants ───────────────────────────────────────────────
@@ -47,48 +48,6 @@ const SEEDS: [u64; 3] = [1, 2, 3];
 /// run` inherits the invoker's cwd, so a raw relative path would scatter
 /// output wherever the example happened to be launched from.
 const CSV_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../experiments/data/nees.csv");
-
-// ─── Minimal deterministic RNG (SplitMix64 + Box–Muller), zero deps ─────
-
-struct Rng {
-    state: u64,
-    spare: Option<f64>,
-}
-
-impl Rng {
-    fn new(seed: u64) -> Self {
-        Rng {
-            state: seed,
-            spare: None,
-        }
-    }
-    fn next_u64(&mut self) -> u64 {
-        self.state = self.state.wrapping_add(0x9E3779B97F4A7C15);
-        let mut z = self.state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
-        z ^ (z >> 31)
-    }
-    /// Uniform in [0, 1).
-    fn uniform(&mut self) -> f64 {
-        (self.next_u64() >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
-    }
-    /// Uniform in [lo, hi).
-    fn uniform_in(&mut self, lo: f64, hi: f64) -> f64 {
-        lo + (hi - lo) * self.uniform()
-    }
-    /// Standard normal via Box–Muller (caches the spare deviate).
-    fn normal(&mut self) -> f64 {
-        if let Some(s) = self.spare.take() {
-            return s;
-        }
-        let (u1, u2) = (self.uniform().max(1e-300), self.uniform());
-        let r = (-2.0 * u1.ln()).sqrt();
-        let (s, c) = (2.0 * std::f64::consts::PI * u2).sin_cos();
-        self.spare = Some(r * s);
-        r * c
-    }
-}
 
 // ─── 6×6 Cholesky solve with positive-definiteness detection ────────────
 
@@ -332,18 +291,6 @@ fn run_sweep(eps: f64, lms: &[[f64; 3]], seed: u64, kappa: f64) -> SweepRow {
         anees_gn: sum_gn / n as f64,
         anees_h: sum_h / n as f64,
     }
-}
-
-/// Mean and unbiased (sample) standard deviation of a small slice.
-fn mean_std(xs: &[f64]) -> (f64, f64) {
-    let n = xs.len() as f64;
-    let mean = xs.iter().sum::<f64>() / n;
-    let var = if xs.len() < 2 {
-        0.0
-    } else {
-        xs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0)
-    };
-    (mean, var.sqrt())
 }
 
 fn main() {

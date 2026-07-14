@@ -564,26 +564,7 @@ fn scatter_linear_info(m: &mut [Vec<f64>], lf: &LinearFactor) {
 mod tests {
     use super::*;
     use crate::autodiff::nested_ad::{D2, Dual};
-
-    // ── Deterministic RNG (SplitMix64; two-uniform Box–Muller) ──────────
-
-    struct TestRng(u64);
-    impl TestRng {
-        fn next_u64(&mut self) -> u64 {
-            self.0 = self.0.wrapping_add(0x9E3779B97F4A7C15);
-            let mut z = self.0;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
-            z ^ (z >> 31)
-        }
-        fn uniform(&mut self) -> f64 {
-            (self.next_u64() >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
-        }
-        fn normal(&mut self) -> f64 {
-            let (u1, u2) = (self.uniform().max(1e-300), self.uniform());
-            (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
-        }
-    }
+    use crate::test_support::Rng;
 
     // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -829,7 +810,7 @@ mod tests {
     /// Closure factors get a correlated whitening (off-diagonal `L`) so the
     /// global oracle also certifies the non-diagonal path.
     fn build_k6(rot_scale: f64) -> GraphProblem {
-        let mut rng = TestRng(7);
+        let mut rng = Rng::new(7);
         let sig_anchor: Vec6 = sig6(0.01 * rot_scale, 0.02);
         let sig_odo: Vec6 = sig6(0.01 * rot_scale, 0.02);
         let sig_clo: Vec6 = sig6(0.01 * rot_scale, 0.02);
@@ -909,7 +890,7 @@ mod tests {
     fn inv6(sig: &Vec6) -> Vec6 {
         std::array::from_fn(|a| 1.0 / sig[a])
     }
-    fn draw(rng: &mut TestRng, sig: &Vec6) -> Vec6 {
+    fn draw(rng: &mut Rng, sig: &Vec6) -> Vec6 {
         std::array::from_fn(|a| sig[a] * rng.normal())
     }
 
@@ -1105,8 +1086,8 @@ mod tests {
     /// matrix exactly like a hand-scattered dense construction.
     #[test]
     fn linear_factor_multinode_scatter() {
-        let mut rng = TestRng(99);
-        let make = |rng: &mut TestRng, nodes: Vec<usize>| {
+        let mut rng = Rng::new(99);
+        let make = |rng: &mut Rng, nodes: Vec<usize>| {
             let d = 6 * nodes.len();
             let grad: Vec<f64> = (0..d).map(|_| rng.normal()).collect();
             // Symmetric info block.

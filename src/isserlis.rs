@@ -160,6 +160,7 @@ mod tests {
     use crate::jacobians_ad::{Tensor6666G, recentering_hessian_at_g, recentering_hessian_g};
     use crate::se3_adsafe::{Mat6G, PoseG, Vec6G, mv6_g, se3_jr_inv_g};
     use crate::test_support::Rng;
+    use crate::{frob, frob_diff};
 
     const XI_BAR: Vec6G<f64> = [0.3, -0.2, 0.4, 0.5, -0.3, 0.7];
 
@@ -192,20 +193,6 @@ mod tests {
     fn draw_xi(rng: &mut Rng, l: &[[f64; 6]; 6]) -> Vec6G<f64> {
         let n: [f64; 6] = std::array::from_fn(|_| rng.normal());
         std::array::from_fn(|i| (0..=i).map(|k| l[i][k] * n[k]).sum())
-    }
-
-    fn frob6(m: &Mat6G<f64>) -> f64 {
-        m.iter().flatten().map(|v| v * v).sum::<f64>().sqrt()
-    }
-
-    fn frob6_diff(a: &Mat6G<f64>, b: &Mat6G<f64>) -> f64 {
-        let mut s = 0.0;
-        for i in 0..6 {
-            for j in 0..6 {
-                s += (a[i][j] - b[i][j]).powi(2);
-            }
-        }
-        s.sqrt()
     }
 
     /// On a *purely quadratic* map y = ½ H:ξξ the two contractions are the
@@ -266,7 +253,7 @@ mod tests {
                 mu[i]
             );
         }
-        let rel = frob6_diff(&cov, &delta) / frob6(&delta);
+        let rel = frob_diff(&cov, &delta) / frob(&delta);
         assert!(
             rel < 0.05,
             "quadratic-map covariance: MC vs Isserlis rel = {rel:.3e}"
@@ -326,8 +313,8 @@ mod tests {
 
         eprintln!(
             "transport corrections: ‖Δ_QQ‖ = {:.3e}, ‖Δ_LC‖ = {:.3e}",
-            frob6(&d_qq),
-            frob6(&d_lc)
+            frob(&d_qq),
+            frob(&d_lc)
         );
 
         // First-order transport JΣJᵀ, then the fully corrected version.
@@ -407,8 +394,8 @@ mod tests {
         );
 
         // Covariance: JΣJᵀ + Δ_QQ + Δ_LC must beat JΣJᵀ by a wide margin.
-        let err1 = frob6_diff(&cov1, &cov_gh);
-        let err2 = frob6_diff(&cov2, &cov_gh);
+        let err1 = frob_diff(&cov1, &cov_gh);
+        let err2 = frob_diff(&cov2, &cov_gh);
         eprintln!(
             "transport vs GH ground truth: mean {err_mean_0:.3e} → {err_mean_2:.3e}, \
              cov {err1:.3e} → {err2:.3e}"
@@ -417,8 +404,8 @@ mod tests {
             err2 < 0.2 * err1,
             "covariance: corrected {err2:.3e} vs first-order {err1:.3e} \
              (Δ_QQ {:.3e}, Δ_LC {:.3e})",
-            frob6(&d_qq),
-            frob6(&d_lc)
+            frob(&d_qq),
+            frob(&d_lc)
         );
 
         // Sanity: J = Jr⁻¹(ξ̄) linearizes F — check against directional FD.

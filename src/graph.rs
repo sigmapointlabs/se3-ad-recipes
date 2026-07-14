@@ -80,7 +80,7 @@ use crate::autodiff::forward_ad::adfn;
 use crate::nll_bench::pseudo_huber;
 use crate::se3_adsafe::{Mat6G, PoseG, Vec6G, adjoint_g, mv6_g, pose_to_g, se3_jr_g, se3_jr_inv_g};
 use crate::se3_unsafe::{Pose, right_update};
-use crate::{Mat6, Vec6, mm, mv};
+use crate::{Mat6, Vec6, mm, mv, scale_mat};
 
 // ─── Factor types ────────────────────────────────────────────────────────
 
@@ -283,16 +283,9 @@ pub fn between_linearize(
     let jr_inv = se3_jr_inv_g::<f64>(&r);
     let xr_inv = x_rel.inverse();
     let ad = adjoint_g::<f64>(&xr_inv.rot, &xr_inv.trans);
-    let mut j_i = [[0.0f64; 6]; 6];
-    for row in 0..6 {
-        for col in 0..6 {
-            let mut acc = 0.0;
-            for k in 0..6 {
-                acc += jr_inv[row][k] * ad[k][col];
-            }
-            j_i[row][col] = -acc;
-        }
-    }
+    // J_i = -(Jr⁻¹ · Ad), the derivative of the between-residual w.r.t. the
+    // right perturbation of base_i.
+    let j_i = scale_mat(-1.0, &mm(&jr_inv, &ad));
 
     let w = match kappa {
         None => 1.0,

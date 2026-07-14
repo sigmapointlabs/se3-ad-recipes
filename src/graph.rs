@@ -78,9 +78,11 @@
 use crate::autodiff::ad_trait::AD;
 use crate::autodiff::forward_ad::adfn;
 use crate::nll_bench::pseudo_huber;
-use crate::se3_adsafe::{Mat6G, PoseG, Vec6G, adjoint_g, mv6_g, pose_to_g, se3_jr_g, se3_jr_inv_g};
+use crate::se3_adsafe::{
+    Mat6G, PoseG, Vec6G, adjoint_g, mtv6_g, mv6_g, pose_to_g, se3_jr_g, se3_jr_inv_g,
+};
 use crate::se3_unsafe::{Pose, right_update};
-use crate::{Mat6, Vec6, mm, mv, scale_mat};
+use crate::{Mat6, Vec6, mm, mv, scale_mat, scale_vec};
 
 // ─── Factor types ────────────────────────────────────────────────────────
 
@@ -135,17 +137,6 @@ pub fn diagonal_sqrt_info(entries: &Vec6) -> Mat6 {
 }
 
 // ─── Small AD-generic helpers ────────────────────────────────────────────
-
-/// y = Mᵀ·v for a 6×6 `T`-valued matrix.
-fn mtv6_g<T: AD>(m: &Mat6G<T>, v: &Vec6G<T>) -> Vec6G<T> {
-    std::array::from_fn(|i| {
-        let mut s = T::constant(0.0);
-        for k in 0..6 {
-            s += m[k][i] * v[k];
-        }
-        s
-    })
-}
 
 /// Whitened square `s = ‖L·r‖²` and the pulled-back weight vector
 /// `Lᵀ·(L·r) = W·r`.
@@ -496,23 +487,14 @@ impl GraphProblem {
 /// `q = w·LᵀL·r` — the weighted residual pulled back through the whitening.
 fn weighted_residual(l: &Mat6, r: &Vec6, w: f64) -> Vec6 {
     let rw = mv(l, r);
-    std::array::from_fn(|a| {
-        let mut acc = 0.0;
-        for k in 0..6 {
-            acc += l[k][a] * rw[k];
-        }
-        w * acc
-    })
+    scale_vec(w, &mtv6_g(l, &rw))
 }
 
 /// `g[node] += Jᵀ·q`.
 fn accumulate_gradient_block(g: &mut [f64], node: usize, j: &Mat6, q: &Vec6) {
+    let jtq = mtv6_g(j, q);
     for col in 0..6 {
-        let mut acc = 0.0;
-        for row in 0..6 {
-            acc += j[row][col] * q[row];
-        }
-        g[6 * node + col] += acc;
+        g[6 * node + col] += jtq[col];
     }
 }
 

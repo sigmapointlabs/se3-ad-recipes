@@ -14,7 +14,7 @@ use crate::autodiff::ad_trait::AD;
 use crate::autodiff::forward_ad::adfn;
 use crate::autodiff::nested_ad::{D2, Dual};
 use crate::projective;
-use crate::se3_adsafe::{Mat6G, PoseG, Vec6G, adjoint_g, pose_to_g, se3_jr_g, se3_jr_inv_g};
+use crate::se3_adsafe::{PoseG, Vec6G, adjoint_g, mtv6_g, pose_to_g, se3_jr_g, se3_jr_inv_g};
 use crate::se3_unsafe::Pose;
 use crate::so3_adsafe::{
     Mat3G, Vec3G, add_mat3_g, hat_g, i3_g, mm3_g, mv3_g, scale_mat3_g, sub_mat3_g,
@@ -526,20 +526,6 @@ fn pose_act_g<T: AD>(pose: &PoseG<T>, x: &Vec3G<T>) -> Vec3G<T> {
         rx[1] + pose.trans[1],
         rx[2] + pose.trans[2],
     ]
-}
-
-/// 6×6 transposed-matrix multiply: `r[i] = Σⱼ M[j][i]·v[j]`.
-fn mtv6_g<T: AD>(m: &Mat6G<T>, v: &Vec6G<T>) -> Vec6G<T> {
-    let z = T::constant(0.0);
-    let mut r = [z; 6];
-    for i in 0..6 {
-        let mut s = z;
-        for j in 0..6 {
-            s += m[j][i] * v[j];
-        }
-        r[i] = s;
-    }
-    r
 }
 
 /// ∇_y r for one whitened pseudo-Huber reprojection residual at the

@@ -78,9 +78,11 @@
 use crate::autodiff::ad_trait::AD;
 use crate::autodiff::forward_ad::adfn;
 use crate::nll_bench::pseudo_huber;
-use crate::se3_adsafe::{Mat6G, PoseG, Vec6G, adjoint_g, mv6_g, pose_to_g, se3_jr_g, se3_jr_inv_g};
+use crate::se3_adsafe::{
+    Mat6G, PoseG, Vec6G, adjoint_g, mtv6_g, mv6_g, pose_to_g, se3_jr_g, se3_jr_inv_g,
+};
 use crate::se3_unsafe::{Pose, right_update};
-use crate::{Mat6, Vec6, mm, mv};
+use crate::{Mat6, Vec6, diag, mm, mv, scale_mat, scale_vec};
 
 // ─── Factor types ────────────────────────────────────────────────────────
 
@@ -117,35 +119,97 @@ pub struct PriorFactor {
 #[derive(Debug, Clone)]
 pub struct LinearFactor {
     /// Global node indices, in the order the blocks are stacked.
-    pub nodes: Vec<usize>,
+    nodes: Vec<usize>,
     /// Gradient at `d = 0`, length `6·nodes.len()`.
-    pub grad: Vec<f64>,
+    grad: Vec<f64>,
     /// Symmetric information block, `6·nodes.len()` square.
-    pub info: Vec<Vec<f64>>,
+    info: Vec<Vec<f64>>,
+}
+
+/// Why a [`LinearFactor::new`] construction was rejected: every block
+/// dimension must equal `6·nodes.len()`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinearFactorError {
+    /// `grad.len()` did not equal `6·nodes.len()`.
+    GradLen { expected: usize, got: usize },
+    /// `info` row count did not equal `6·nodes.len()`.
+    InfoRows { expected: usize, got: usize },
+    /// `info[row].len()` did not equal `6·nodes.len()`.
+    InfoRowLen {
+        row: usize,
+        expected: usize,
+        got: usize,
+    },
+}
+
+impl std::fmt::Display for LinearFactorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            LinearFactorError::GradLen { expected, got } => write!(
+                f,
+                "LinearFactor.grad length {got} != expected 6*nodes.len() = {expected}"
+            ),
+            LinearFactorError::InfoRows { expected, got } => write!(
+                f,
+                "LinearFactor.info row count {got} != expected 6*nodes.len() = {expected}"
+            ),
+            LinearFactorError::InfoRowLen { row, expected, got } => write!(
+                f,
+                "LinearFactor.info[{row}] length {got} != expected 6*nodes.len() = {expected}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for LinearFactorError {}
+
+impl LinearFactor {
+    /// Construct a dimension-checked linear factor.  Every block dimension
+    /// must equal `6·nodes.len()`; otherwise returns [`LinearFactorError`]
+    /// rather than the previous behaviour (short blocks panicked with raw
+    /// index messages, over-long blocks were silently truncated).
+    ///
+    /// Node indices are *not* range-checked here — the factor does not know
+    /// the graph size.  An out-of-range index is caught when the factor is
+    /// scattered into a [`GraphProblem`] of known dimension.
+    pub fn new(
+        nodes: Vec<usize>,
+        grad: Vec<f64>,
+        info: Vec<Vec<f64>>,
+    ) -> Result<Self, LinearFactorError> {
+        let dim = 6 * nodes.len();
+        if grad.len() != dim {
+            return Err(LinearFactorError::GradLen {
+                expected: dim,
+                got: grad.len(),
+            });
+        }
+        if info.len() != dim {
+            return Err(LinearFactorError::InfoRows {
+                expected: dim,
+                got: info.len(),
+            });
+        }
+        for (row, r) in info.iter().enumerate() {
+            if r.len() != dim {
+                return Err(LinearFactorError::InfoRowLen {
+                    row,
+                    expected: dim,
+                    got: r.len(),
+                });
+            }
+        }
+        Ok(LinearFactor { nodes, grad, info })
+    }
 }
 
 /// Whitening matrix for independent per-axis noise: `L = diag(entries)`
 /// with `entries = 1/σ` per tangent component.
 pub fn diagonal_sqrt_info(entries: &Vec6) -> Mat6 {
-    let mut l = [[0.0f64; 6]; 6];
-    for (a, e) in entries.iter().enumerate() {
-        l[a][a] = *e;
-    }
-    l
+    diag(entries)
 }
 
 // ─── Small AD-generic helpers ────────────────────────────────────────────
-
-/// y = Mᵀ·v for a 6×6 `T`-valued matrix.
-fn mtv6_g<T: AD>(m: &Mat6G<T>, v: &Vec6G<T>) -> Vec6G<T> {
-    std::array::from_fn(|i| {
-        let mut s = T::constant(0.0);
-        for k in 0..6 {
-            s += m[k][i] * v[k];
-        }
-        s
-    })
-}
 
 /// Whitened square `s = ‖L·r‖²` and the pulled-back weight vector
 /// `Lᵀ·(L·r) = W·r`.
@@ -283,16 +347,9 @@ pub fn between_linearize(
     let jr_inv = se3_jr_inv_g::<f64>(&r);
     let xr_inv = x_rel.inverse();
     let ad = adjoint_g::<f64>(&xr_inv.rot, &xr_inv.trans);
-    let mut j_i = [[0.0f64; 6]; 6];
-    for row in 0..6 {
-        for col in 0..6 {
-            let mut acc = 0.0;
-            for k in 0..6 {
-                acc += jr_inv[row][k] * ad[k][col];
-            }
-            j_i[row][col] = -acc;
-        }
-    }
+    // J_i = -(Jr⁻¹ · Ad), the derivative of the between-residual w.r.t. the
+    // right perturbation of base_i.
+    let j_i = scale_mat(-1.0, &mm(&jr_inv, &ad));
 
     let w = match kappa {
         None => 1.0,
@@ -385,9 +442,13 @@ impl GraphProblem {
             accumulate_gradient_block(&mut g, f.i, &lin.j_i, &q);
             accumulate_gradient_block(&mut g, f.j, &lin.j_j, &q);
         }
+        let n_nodes = self.poses.len();
         for lf in &self.linear {
-            debug_assert_eq!(lf.grad.len(), 6 * lf.nodes.len());
             for (bi, &node) in lf.nodes.iter().enumerate() {
+                assert!(
+                    node < n_nodes,
+                    "LinearFactor node index {node} out of range for {n_nodes}-node graph"
+                );
                 for a in 0..6 {
                     g[6 * node + a] += lf.grad[6 * bi + a];
                 }
@@ -503,23 +564,14 @@ impl GraphProblem {
 /// `q = w·LᵀL·r` — the weighted residual pulled back through the whitening.
 fn weighted_residual(l: &Mat6, r: &Vec6, w: f64) -> Vec6 {
     let rw = mv(l, r);
-    std::array::from_fn(|a| {
-        let mut acc = 0.0;
-        for k in 0..6 {
-            acc += l[k][a] * rw[k];
-        }
-        w * acc
-    })
+    scale_vec(w, &mtv6_g(l, &rw))
 }
 
 /// `g[node] += Jᵀ·q`.
 fn accumulate_gradient_block(g: &mut [f64], node: usize, j: &Mat6, q: &Vec6) {
+    let jtq = mtv6_g(j, q);
     for col in 0..6 {
-        let mut acc = 0.0;
-        for row in 0..6 {
-            acc += j[row][col] * q[row];
-        }
-        g[6 * node + col] += acc;
+        g[6 * node + col] += jtq[col];
     }
 }
 
@@ -545,10 +597,13 @@ fn accumulate_gn_block(
 
 /// Scatter a [`LinearFactor`]'s information block into the global matrix.
 fn scatter_linear_info(m: &mut [Vec<f64>], lf: &LinearFactor) {
-    let k = lf.nodes.len();
-    debug_assert_eq!(lf.info.len(), 6 * k);
+    let n_nodes = m.len() / 6;
     for (bi, &na) in lf.nodes.iter().enumerate() {
         for (bj, &nb) in lf.nodes.iter().enumerate() {
+            assert!(
+                na < n_nodes && nb < n_nodes,
+                "LinearFactor node index out of range for {n_nodes}-node graph"
+            );
             for a in 0..6 {
                 for b in 0..6 {
                     m[6 * na + a][6 * nb + b] += lf.info[6 * bi + a][6 * bj + b];
@@ -564,26 +619,7 @@ fn scatter_linear_info(m: &mut [Vec<f64>], lf: &LinearFactor) {
 mod tests {
     use super::*;
     use crate::autodiff::nested_ad::{D2, Dual};
-
-    // ── Deterministic RNG (SplitMix64; two-uniform Box–Muller) ──────────
-
-    struct TestRng(u64);
-    impl TestRng {
-        fn next_u64(&mut self) -> u64 {
-            self.0 = self.0.wrapping_add(0x9E3779B97F4A7C15);
-            let mut z = self.0;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
-            z ^ (z >> 31)
-        }
-        fn uniform(&mut self) -> f64 {
-            (self.next_u64() >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
-        }
-        fn normal(&mut self) -> f64 {
-            let (u1, u2) = (self.uniform().max(1e-300), self.uniform());
-            (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
-        }
-    }
+    use crate::test_support::Rng;
 
     // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -829,7 +865,7 @@ mod tests {
     /// Closure factors get a correlated whitening (off-diagonal `L`) so the
     /// global oracle also certifies the non-diagonal path.
     fn build_k6(rot_scale: f64) -> GraphProblem {
-        let mut rng = TestRng(7);
+        let mut rng = Rng::new(7);
         let sig_anchor: Vec6 = sig6(0.01 * rot_scale, 0.02);
         let sig_odo: Vec6 = sig6(0.01 * rot_scale, 0.02);
         let sig_clo: Vec6 = sig6(0.01 * rot_scale, 0.02);
@@ -909,7 +945,7 @@ mod tests {
     fn inv6(sig: &Vec6) -> Vec6 {
         std::array::from_fn(|a| 1.0 / sig[a])
     }
-    fn draw(rng: &mut TestRng, sig: &Vec6) -> Vec6 {
+    fn draw(rng: &mut Rng, sig: &Vec6) -> Vec6 {
         std::array::from_fn(|a| sig[a] * rng.normal())
     }
 
@@ -1073,11 +1109,7 @@ mod tests {
             poses: vec![bi, bj],
             priors: vec![],
             factors: vec![],
-            linear: vec![LinearFactor {
-                nodes: vec![0, 1],
-                grad,
-                info,
-            }],
+            linear: vec![LinearFactor::new(vec![0, 1], grad, info).unwrap()],
         };
 
         let g_a = p_between.gradient();
@@ -1105,8 +1137,8 @@ mod tests {
     /// matrix exactly like a hand-scattered dense construction.
     #[test]
     fn linear_factor_multinode_scatter() {
-        let mut rng = TestRng(99);
-        let make = |rng: &mut TestRng, nodes: Vec<usize>| {
+        let mut rng = Rng::new(99);
+        let make = |rng: &mut Rng, nodes: Vec<usize>| {
             let d = 6 * nodes.len();
             let grad: Vec<f64> = (0..d).map(|_| rng.normal()).collect();
             // Symmetric info block.
@@ -1118,7 +1150,7 @@ mod tests {
                     info[b][a] = v;
                 }
             }
-            LinearFactor { nodes, grad, info }
+            LinearFactor::new(nodes, grad, info).unwrap()
         };
         let lf_a = make(&mut rng, vec![0, 2, 3]);
         let lf_b = make(&mut rng, vec![2, 1]);
@@ -1155,6 +1187,40 @@ mod tests {
         assert!(rel_err_vec(&p.gradient(), &g_ref, 1.0) < 1e-15);
         assert!(rel_err_mat(&p.gn_information(), &m_ref) < 1e-15);
         assert!(rel_err_mat(&p.exact_hessian(), &m_ref) < 1e-15);
+    }
+
+    /// The checked constructor rejects every block-dimension mismatch
+    /// (previously: short blocks panicked with a raw index, over-long
+    /// blocks were silently truncated).
+    #[test]
+    fn linear_factor_new_validates_dimensions() {
+        // grad too short for a 2-node (dim-12) factor.
+        assert_eq!(
+            LinearFactor::new(vec![0, 1], vec![0.0; 6], vec![vec![0.0; 12]; 12]).unwrap_err(),
+            LinearFactorError::GradLen {
+                expected: 12,
+                got: 6
+            }
+        );
+        // info has the wrong number of rows.
+        assert_eq!(
+            LinearFactor::new(vec![0], vec![0.0; 6], vec![vec![0.0; 6]; 5]).unwrap_err(),
+            LinearFactorError::InfoRows {
+                expected: 6,
+                got: 5
+            }
+        );
+        // info row is over-long (was silently truncated before).
+        assert_eq!(
+            LinearFactor::new(vec![0], vec![0.0; 6], vec![vec![0.0; 7]; 6]).unwrap_err(),
+            LinearFactorError::InfoRowLen {
+                row: 0,
+                expected: 6,
+                got: 7
+            }
+        );
+        // Correctly-dimensioned factor is accepted.
+        assert!(LinearFactor::new(vec![0], vec![0.0; 6], vec![vec![0.0; 6]; 6]).is_ok());
     }
 
     // ── (f) small-angle regime: a–d at ‖relative rotation‖ ~ 1e-9 ───────

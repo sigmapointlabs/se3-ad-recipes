@@ -56,6 +56,19 @@ pub fn mv6_g<T: AD>(m: &Mat6G<T>, v: &Vec6G<T>) -> Vec6G<T> {
     r
 }
 
+pub fn mtv6_g<T: AD>(m: &Mat6G<T>, v: &Vec6G<T>) -> Vec6G<T> {
+    let z = T::constant(0.0);
+    let mut r = [z; 6];
+    for i in 0..6 {
+        let mut s = z;
+        for j in 0..6 {
+            s += m[j][i] * v[j];
+        }
+        r[i] = s;
+    }
+    r
+}
+
 pub fn mm6_g<T: AD>(a: &Mat6G<T>, b: &Mat6G<T>) -> Mat6G<T> {
     let z = T::constant(0.0);
     let mut c = [[z; 6]; 6];

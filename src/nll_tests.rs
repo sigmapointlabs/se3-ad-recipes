@@ -20,30 +20,12 @@ use crate::nll_bench::{
     hessian_fd_analytical_grad, hessian_fd_grad, hessian_fd_value, hessian_for,
 };
 use crate::so3_adsafe::{Vec3G, d_prime_omega_over_theta, scalar_d_prime_s, theta_sq_from_omega};
+use crate::{frob, frob_diff};
 
 // =====================================================================
 // Diagnostics.
 // =====================================================================
 
-fn frob(m: &[[f64; 6]; 6]) -> f64 {
-    let mut s = 0.0;
-    for i in 0..6 {
-        for j in 0..6 {
-            s += m[i][j] * m[i][j];
-        }
-    }
-    s.sqrt()
-}
-fn frob_diff(a: &[[f64; 6]; 6], b: &[[f64; 6]; 6]) -> f64 {
-    let mut s = 0.0;
-    for i in 0..6 {
-        for j in 0..6 {
-            let d = a[i][j] - b[i][j];
-            s += d * d;
-        }
-    }
-    s.sqrt()
-}
 fn count_nan(m: &[[f64; 6]; 6]) -> usize {
     let mut n = 0;
     for i in 0..6 {

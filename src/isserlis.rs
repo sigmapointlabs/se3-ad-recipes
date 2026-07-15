@@ -28,21 +28,8 @@
 //! `H[i][p][q]` (the mixed-AD recipe; see the in-tree transport test for
 //! the five-line construction).
 
+use crate::api::expert::linalg::matmul;
 use crate::autodiff::ad_trait::AD;
-
-/// a·b for N×N `T`-valued matrices (local helper; keeps the module
-/// free-standing).
-fn matmul_g<T: AD, const N: usize>(a: &[[T; N]; N], b: &[[T; N]; N]) -> [[T; N]; N] {
-    std::array::from_fn(|i| {
-        std::array::from_fn(|j| {
-            let mut s = T::constant(0.0);
-            for k in 0..N {
-                s += a[i][k] * b[k][j];
-            }
-            s
-        })
-    })
-}
 
 /// Second-order mean shift of a zero-mean Gaussian pushed through a chart
 /// map with Hessian tensor `h` (index order `[out][in][in]`, e.g. from
@@ -90,7 +77,7 @@ pub fn isserlis_covariance_correction_g<T: AD, const N: usize>(
     let z = T::constant(0.0);
     let half = T::constant(0.5);
     // P_i = H_i·Σ;  Δ_ij = ½ tr(P_i·P_j) = ½ Σ_ab P_i[a][b]·P_j[b][a].
-    let p: [[[T; N]; N]; N] = std::array::from_fn(|i| matmul_g(&h[i], sigma));
+    let p: [[[T; N]; N]; N] = std::array::from_fn(|i| matmul(&h[i], sigma));
     let mut delta = [[z; N]; N];
     for i in 0..N {
         for j in 0..=i {
@@ -147,7 +134,7 @@ pub fn linear_cubic_covariance_correction_g<T: AD, const N: usize>(
     }
 
     // A = J·Σ·Mᵀ;  Δ_LC = ½ (A + Aᵀ).
-    let js = matmul_g(jac, sigma);
+    let js = matmul(jac, sigma);
     let mut delta = [[z; N]; N];
     for i in 0..N {
         for j in 0..N {
@@ -172,25 +159,8 @@ mod tests {
     use super::*;
     use crate::jacobians_ad::{Tensor6666G, recentering_hessian_at_g, recentering_hessian_g};
     use crate::se3_adsafe::{Mat6G, PoseG, Vec6G, mv6_g, se3_jr_inv_g};
-
-    /// SplitMix64 + two-uniform Box–Muller, deterministic.
-    struct TestRng(u64);
-    impl TestRng {
-        fn next_u64(&mut self) -> u64 {
-            self.0 = self.0.wrapping_add(0x9E3779B97F4A7C15);
-            let mut z = self.0;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
-            z ^ (z >> 31)
-        }
-        fn uniform(&mut self) -> f64 {
-            (self.next_u64() >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
-        }
-        fn normal(&mut self) -> f64 {
-            let (u1, u2) = (self.uniform().max(1e-300), self.uniform());
-            (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
-        }
-    }
+    use crate::test_support::Rng;
+    use crate::{frob, frob_diff};
 
     const XI_BAR: Vec6G<f64> = [0.3, -0.2, 0.4, 0.5, -0.3, 0.7];
 
@@ -220,23 +190,9 @@ mod tests {
         s
     }
 
-    fn draw_xi(rng: &mut TestRng, l: &[[f64; 6]; 6]) -> Vec6G<f64> {
+    fn draw_xi(rng: &mut Rng, l: &[[f64; 6]; 6]) -> Vec6G<f64> {
         let n: [f64; 6] = std::array::from_fn(|_| rng.normal());
         std::array::from_fn(|i| (0..=i).map(|k| l[i][k] * n[k]).sum())
-    }
-
-    fn frob6(m: &Mat6G<f64>) -> f64 {
-        m.iter().flatten().map(|v| v * v).sum::<f64>().sqrt()
-    }
-
-    fn frob6_diff(a: &Mat6G<f64>, b: &Mat6G<f64>) -> f64 {
-        let mut s = 0.0;
-        for i in 0..6 {
-            for j in 0..6 {
-                s += (a[i][j] - b[i][j]).powi(2);
-            }
-        }
-        s.sqrt()
     }
 
     /// On a *purely quadratic* map y = ½ H:ξξ the two contractions are the
@@ -252,7 +208,7 @@ mod tests {
         let delta = isserlis_covariance_correction_g(&h, &sigma);
 
         let n = 200_000usize;
-        let mut rng = TestRng(42);
+        let mut rng = Rng::new(42);
         let mut mean = [0.0f64; 6];
         let mut cov = [[0.0f64; 6]; 6];
         let mut samples = Vec::with_capacity(n);
@@ -297,11 +253,134 @@ mod tests {
                 mu[i]
             );
         }
-        let rel = frob6_diff(&cov, &delta) / frob6(&delta);
+        let rel = frob_diff(&cov, &delta) / frob(&delta);
         assert!(
             rel < 0.05,
             "quadratic-map covariance: MC vs Isserlis rel = {rel:.3e}"
         );
+    }
+
+    /// N = 9 smoke test.  The three contractions are `<const N>` but every
+    /// other test pins N = 6; exercise the SE₂(3)-sized path on a synthetic
+    /// symmetric 9×9×9 tensor so an SE(3)-only regression can't slip through
+    /// silently.  Mean shift and QQ covariance are MC-validated on the
+    /// quadratic map y = ½ H:ξξ; the linear×cubic term is checked for a
+    /// finite, symmetric result.
+    #[test]
+    fn isserlis_contractions_run_at_n9() {
+        const N: usize = 9;
+        // Synthetic Hessian, symmetric in the trailing two indices (the
+        // symmetry the Isserlis derivation assumes).
+        let mut h = [[[0.0f64; N]; N]; N];
+        for i in 0..N {
+            for p in 0..N {
+                for q in 0..=p {
+                    let v = 0.1 * (((i + 2 * p + 3 * q) % 5) as f64 - 2.0);
+                    h[i][p][q] = v;
+                    h[i][q][p] = v;
+                }
+            }
+        }
+        // Lower-triangular factor L → Σ = L·Lᵀ (mild correlations, SPD).
+        let mut l = [[0.0f64; N]; N];
+        for i in 0..N {
+            l[i][i] = 0.15 + 0.01 * i as f64;
+            for j in 0..i {
+                l[i][j] = 0.02 * ((i + j) % 3) as f64;
+            }
+        }
+        let mut sigma = [[0.0f64; N]; N];
+        for i in 0..N {
+            for j in 0..N {
+                for k in 0..N {
+                    sigma[i][j] += l[i][k] * l[j][k];
+                }
+            }
+        }
+
+        let mu = second_order_mean_shift_g::<f64, N>(&h, &sigma);
+        let delta = isserlis_covariance_correction_g::<f64, N>(&h, &sigma);
+
+        // Monte-Carlo ground truth on the quadratic map y = ½ H:ξξ.
+        let n = 200_000usize;
+        let mut rng = Rng::new(9);
+        let mut mean = [0.0f64; N];
+        let mut samples: Vec<[f64; N]> = Vec::with_capacity(n);
+        for _ in 0..n {
+            let raw: [f64; N] = std::array::from_fn(|_| rng.normal());
+            let xi: [f64; N] = std::array::from_fn(|i| (0..=i).map(|k| l[i][k] * raw[k]).sum());
+            let y: [f64; N] = std::array::from_fn(|i| {
+                let mut acc = 0.0;
+                for p in 0..N {
+                    for q in 0..N {
+                        acc += h[i][p][q] * xi[p] * xi[q];
+                    }
+                }
+                0.5 * acc
+            });
+            for i in 0..N {
+                mean[i] += y[i];
+            }
+            samples.push(y);
+        }
+        for m in mean.iter_mut() {
+            *m /= n as f64;
+        }
+        let mut cov = [[0.0f64; N]; N];
+        for y in &samples {
+            for i in 0..N {
+                for j in 0..N {
+                    cov[i][j] += (y[i] - mean[i]) * (y[j] - mean[j]);
+                }
+            }
+        }
+        for row in cov.iter_mut() {
+            for v in row.iter_mut() {
+                *v /= (n - 1) as f64;
+            }
+        }
+
+        let mean_scale = mu.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        for i in 0..N {
+            assert!(
+                (mean[i] - mu[i]).abs() < 0.02 * mean_scale,
+                "N=9 mean[{i}]: MC {:.5e} vs ½H:Σ {:.5e}",
+                mean[i],
+                mu[i]
+            );
+        }
+        let rel = frob_diff(&cov, &delta) / frob(&delta);
+        assert!(
+            rel < 0.05,
+            "N=9 quadratic-map covariance: MC vs Isserlis rel = {rel:.3e}"
+        );
+
+        // Exercise the linear×cubic contraction at N = 9: it must run and
+        // return a finite, symmetric matrix (Δ_LC = ½(A + Aᵀ)).
+        let mut jac = [[0.0f64; N]; N];
+        for i in 0..N {
+            jac[i][i] = 1.0 + 0.05 * i as f64;
+        }
+        let mut cubic = [[[[0.0f64; N]; N]; N]; N];
+        for i in 0..N {
+            for p in 0..N {
+                for q in 0..N {
+                    for r in 0..N {
+                        cubic[i][p][q][r] = 0.01 * (((i + p + q + r) % 3) as f64 - 1.0);
+                    }
+                }
+            }
+        }
+        let lc = linear_cubic_covariance_correction_g::<f64, N>(&jac, &cubic, &sigma);
+        for i in 0..N {
+            for j in 0..N {
+                assert!(lc[i][j].is_finite(), "N=9 Δ_LC[{i}][{j}] not finite");
+                assert!(
+                    (lc[i][j] - lc[j][i]).abs() < 1e-12,
+                    "N=9 Δ_LC not symmetric at [{i}][{j}]"
+                );
+            }
+        }
     }
 
     /// Cubic tensor of F(c) = Log(Exp(ξ̄)·Exp(c)) − ξ̄ at c = 0 via the
@@ -357,8 +436,8 @@ mod tests {
 
         eprintln!(
             "transport corrections: ‖Δ_QQ‖ = {:.3e}, ‖Δ_LC‖ = {:.3e}",
-            frob6(&d_qq),
-            frob6(&d_lc)
+            frob(&d_qq),
+            frob(&d_lc)
         );
 
         // First-order transport JΣJᵀ, then the fully corrected version.
@@ -438,8 +517,8 @@ mod tests {
         );
 
         // Covariance: JΣJᵀ + Δ_QQ + Δ_LC must beat JΣJᵀ by a wide margin.
-        let err1 = frob6_diff(&cov1, &cov_gh);
-        let err2 = frob6_diff(&cov2, &cov_gh);
+        let err1 = frob_diff(&cov1, &cov_gh);
+        let err2 = frob_diff(&cov2, &cov_gh);
         eprintln!(
             "transport vs GH ground truth: mean {err_mean_0:.3e} → {err_mean_2:.3e}, \
              cov {err1:.3e} → {err2:.3e}"
@@ -448,8 +527,8 @@ mod tests {
             err2 < 0.2 * err1,
             "covariance: corrected {err2:.3e} vs first-order {err1:.3e} \
              (Δ_QQ {:.3e}, Δ_LC {:.3e})",
-            frob6(&d_qq),
-            frob6(&d_lc)
+            frob(&d_qq),
+            frob(&d_lc)
         );
 
         // Sanity: J = Jr⁻¹(ξ̄) linearizes F — check against directional FD.

@@ -33,6 +33,7 @@ use se3_ad_recipes::Vec6;
 use se3_ad_recipes::graph::{BetweenFactor, GraphProblem, PriorFactor, diagonal_sqrt_info};
 use se3_ad_recipes::linalg::{Chol, cholesky_n};
 use se3_ad_recipes::se3_unsafe::Pose;
+use se3_ad_recipes::test_support::{Rng, mean_std};
 
 // ─── Experiment constants ───────────────────────────────────────────────
 
@@ -60,46 +61,11 @@ const CSV_PATH: &str = concat!(
     "/../experiments/data/posegraph.csv"
 );
 
-// ─── Minimal deterministic RNG (SplitMix64 + Box–Muller), zero deps ─────
+// ─── ξ ~ N(0, diag(sig²)) draw over the shared deterministic RNG ─────────
 
-struct Rng {
-    state: u64,
-    spare: Option<f64>,
-}
-
-impl Rng {
-    fn new(seed: u64) -> Self {
-        Rng {
-            state: seed,
-            spare: None,
-        }
-    }
-    fn next_u64(&mut self) -> u64 {
-        self.state = self.state.wrapping_add(0x9E3779B97F4A7C15);
-        let mut z = self.state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
-        z ^ (z >> 31)
-    }
-    /// Uniform in [0, 1).
-    fn uniform(&mut self) -> f64 {
-        (self.next_u64() >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
-    }
-    /// Standard normal via Box–Muller (caches the spare deviate).
-    fn normal(&mut self) -> f64 {
-        if let Some(s) = self.spare.take() {
-            return s;
-        }
-        let (u1, u2) = (self.uniform().max(1e-300), self.uniform());
-        let r = (-2.0 * u1.ln()).sqrt();
-        let (s, c) = (2.0 * std::f64::consts::PI * u2).sin_cos();
-        self.spare = Some(r * s);
-        r * c
-    }
-    /// Draw ξ ~ N(0, diag(sig²)).
-    fn draw6(&mut self, sig: &Vec6) -> Vec6 {
-        std::array::from_fn(|a| sig[a] * self.normal())
-    }
+/// Draw ξ ~ N(0, diag(sig²)).
+fn draw6(rng: &mut Rng, sig: &Vec6) -> Vec6 {
+    std::array::from_fn(|a| sig[a] * rng.normal())
 }
 
 fn inv6(sig: &Vec6) -> Vec6 {
@@ -114,9 +80,9 @@ fn sample_trial(rng: &mut Rng, gamma: f64) -> (Vec<Pose>, GraphProblem) {
     let x_anc = Pose::identity();
 
     let mut truth = Vec::with_capacity(K);
-    truth.push(x_anc.compose(&Pose::exp(&rng.draw6(&SIG_ANCHOR))));
+    truth.push(x_anc.compose(&Pose::exp(&draw6(rng, &SIG_ANCHOR))));
     for k in 0..K - 1 {
-        let w = rng.draw6(&SIG_STEP);
+        let w = draw6(rng, &SIG_STEP);
         let u: Vec6 = std::array::from_fn(|a| MEAN_STEP[a] + w[a]);
         truth.push(truth[k].compose(&Pose::exp(&u)));
     }
@@ -125,7 +91,7 @@ fn sample_trial(rng: &mut Rng, gamma: f64) -> (Vec<Pose>, GraphProblem) {
     let mut z_odo = Vec::with_capacity(K - 1);
     for k in 0..K - 1 {
         let rel = truth[k].inverse().compose(&truth[k + 1]);
-        let z = rel.compose(&Pose::exp(&rng.draw6(&SIG_ODO)));
+        let z = rel.compose(&Pose::exp(&draw6(rng, &SIG_ODO)));
         z_odo.push(z);
         factors.push(BetweenFactor {
             i: k,
@@ -142,7 +108,7 @@ fn sample_trial(rng: &mut Rng, gamma: f64) -> (Vec<Pose>, GraphProblem) {
         } else {
             &SIG_CLO
         };
-        let z = rel.compose(&Pose::exp(&rng.draw6(sig)));
+        let z = rel.compose(&Pose::exp(&draw6(rng, sig)));
         factors.push(BetweenFactor {
             i,
             j,
@@ -281,6 +247,10 @@ fn run_sweep(gamma: f64, seed: u64) -> SweepRow {
         s_lh += lh;
         n += 1;
     }
+    assert!(
+        n > 0,
+        "all {M_TRIALS} trials skipped at gamma={gamma} — cannot form an ANEES mean"
+    );
     SweepRow {
         n,
         skipped,
@@ -289,18 +259,6 @@ fn run_sweep(gamma: f64, seed: u64) -> SweepRow {
         last_gn: s_lg / n as f64,
         last_h: s_lh / n as f64,
     }
-}
-
-/// Mean and unbiased (sample) standard deviation of a small slice.
-fn mean_std(xs: &[f64]) -> (f64, f64) {
-    let n = xs.len() as f64;
-    let mean = xs.iter().sum::<f64>() / n;
-    let var = if xs.len() < 2 {
-        0.0
-    } else {
-        xs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0)
-    };
-    (mean, var.sqrt())
 }
 
 fn main() {
@@ -359,10 +317,11 @@ fn main() {
         let mut lh = Vec::with_capacity(SEEDS.len());
         let mut n_total = 0usize;
         let mut skipped_total = 0usize;
-        for (j, &seed) in SEEDS.iter().enumerate() {
-            // Seed streams: distinct per (gamma, seed) pair so no two
-            // sweep points share a Monte-Carlo trajectory.
-            let stream = 1 + (k as u64) * 100 + seed + (j as u64);
+        for &seed in SEEDS.iter() {
+            // Seed streams: unique per (gamma-index k, seed) with a k-stride
+            // (1000) far larger than any seed, so the streams stay distinct
+            // regardless of how SEEDS is ordered — no silent collision.
+            let stream = 1 + (k as u64) * 1000 + seed;
             let row = run_sweep(gamma, stream);
             fg.push(row.full_gn);
             fh.push(row.full_h);

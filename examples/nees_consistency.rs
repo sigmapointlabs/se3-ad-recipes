@@ -27,6 +27,7 @@ use se3_ad_recipes::nll_bench::{FixedBasis, Problem, hessian_d2, nll_gradient};
 use se3_ad_recipes::projective::{j_cross, project, project_jacobian, transform_point};
 use se3_ad_recipes::se3_adsafe::{adjoint_g, se3_jr_inv_g};
 use se3_ad_recipes::se3_unsafe::{Pose, right_update};
+use se3_ad_recipes::test_support::{Rng, mean_std};
 use se3_ad_recipes::{Mat6, Vec6, mm, mv, norm, transpose};
 
 // ─── Experiment constants ───────────────────────────────────────────────
@@ -47,48 +48,6 @@ const SEEDS: [u64; 3] = [1, 2, 3];
 /// run` inherits the invoker's cwd, so a raw relative path would scatter
 /// output wherever the example happened to be launched from.
 const CSV_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../experiments/data/nees.csv");
-
-// ─── Minimal deterministic RNG (SplitMix64 + Box–Muller), zero deps ─────
-
-struct Rng {
-    state: u64,
-    spare: Option<f64>,
-}
-
-impl Rng {
-    fn new(seed: u64) -> Self {
-        Rng {
-            state: seed,
-            spare: None,
-        }
-    }
-    fn next_u64(&mut self) -> u64 {
-        self.state = self.state.wrapping_add(0x9E3779B97F4A7C15);
-        let mut z = self.state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
-        z ^ (z >> 31)
-    }
-    /// Uniform in [0, 1).
-    fn uniform(&mut self) -> f64 {
-        (self.next_u64() >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
-    }
-    /// Uniform in [lo, hi).
-    fn uniform_in(&mut self, lo: f64, hi: f64) -> f64 {
-        lo + (hi - lo) * self.uniform()
-    }
-    /// Standard normal via Box–Muller (caches the spare deviate).
-    fn normal(&mut self) -> f64 {
-        if let Some(s) = self.spare.take() {
-            return s;
-        }
-        let (u1, u2) = (self.uniform().max(1e-300), self.uniform());
-        let r = (-2.0 * u1.ln()).sqrt();
-        let (s, c) = (2.0 * std::f64::consts::PI * u2).sin_cos();
-        self.spare = Some(r * s);
-        r * c
-    }
-}
 
 // ─── 6×6 Cholesky solve with positive-definiteness detection ────────────
 
@@ -326,24 +285,16 @@ fn run_sweep(eps: f64, lms: &[[f64; 3]], seed: u64, kappa: f64) -> SweepRow {
         sum_h += se3_ad_recipes::dot(&xi_err, &mv(&h_exact, &xi_err));
         n += 1;
     }
+    assert!(
+        n > 0,
+        "all {M_TRIALS} trials skipped at eps={eps} — cannot form an ANEES mean"
+    );
     SweepRow {
         n,
         skipped,
         anees_gn: sum_gn / n as f64,
         anees_h: sum_h / n as f64,
     }
-}
-
-/// Mean and unbiased (sample) standard deviation of a small slice.
-fn mean_std(xs: &[f64]) -> (f64, f64) {
-    let n = xs.len() as f64;
-    let mean = xs.iter().sum::<f64>() / n;
-    let var = if xs.len() < 2 {
-        0.0
-    } else {
-        xs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0)
-    };
-    (mean, var.sqrt())
 }
 
 fn main() {
@@ -395,10 +346,11 @@ fn main() {
         let mut h_vals = Vec::with_capacity(SEEDS.len());
         let mut n_total = 0usize;
         let mut skipped_total = 0usize;
-        for (j, &seed) in SEEDS.iter().enumerate() {
-            // Seed streams: distinct per (epsilon, seed) pair so no two
-            // sweep points share a Monte-Carlo trajectory.
-            let stream = 1 + (k as u64) * 100 + seed + (j as u64);
+        for &seed in SEEDS.iter() {
+            // Seed streams: unique per (epsilon-index k, seed) with a k-stride
+            // (1000) far larger than any seed, so the streams stay distinct
+            // regardless of how SEEDS is ordered — no silent collision.
+            let stream = 1 + (k as u64) * 1000 + seed;
             let row = run_sweep(eps, &lms, stream, KAPPA);
             gn_vals.push(row.anees_gn);
             h_vals.push(row.anees_h);
@@ -448,8 +400,8 @@ fn main() {
     let kappa_control = 1.0e9;
     let mut gn_vals = Vec::with_capacity(SEEDS.len());
     let mut h_vals = Vec::with_capacity(SEEDS.len());
-    for (j, &seed) in SEEDS.iter().enumerate() {
-        let stream = 90_000 + seed + (j as u64);
+    for &seed in SEEDS.iter() {
+        let stream = 90_000 + seed;
         let row = run_sweep(0.0, &lms, stream, kappa_control);
         gn_vals.push(row.anees_gn);
         h_vals.push(row.anees_h);

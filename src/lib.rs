@@ -88,6 +88,9 @@ pub mod linalg;
 #[cfg(any(test, feature = "bench-support"))]
 #[doc(hidden)]
 pub mod nll_bench;
+#[cfg(any(test, feature = "bench-support"))]
+#[doc(hidden)]
+pub mod test_support;
 
 #[cfg(test)]
 mod nll_tests;
@@ -330,6 +333,18 @@ pub fn scale_mat<const N: usize>(s: f64, m: &[[f64; N]; N]) -> [[f64; N]; N] {
         }
     }
     c
+}
+
+/// Diagonal N×N matrix from its diagonal entries: `M[i][i] = entries[i]`,
+/// off-diagonal zero.
+#[doc(hidden)]
+#[inline]
+pub fn diag<const N: usize>(entries: &[f64; N]) -> [[f64; N]; N] {
+    let mut m = [[0.0f64; N]; N];
+    for i in 0..N {
+        m[i][i] = entries[i];
+    }
+    m
 }
 
 /// Trace of an N×N matrix.
